@@ -210,8 +210,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val primary: Parsley[ast.Expr] = {
     choice(
-      ast.Expr.ZTrue <# "true",
-      ast.Expr.ZFalse <# "false",
+      ast.Expr.ZBool(lexeme.symbol("true").as(true) <|> lexeme.symbol("false").as(false)),
       atomic(ast.Expr.ZByte(lexer.nonlexeme.integer.number8[Byte] <* (parsley.character.satisfy(it => it == 'b' || it == 'B') <* lexer.space.whiteSpace))),
       atomic(ast.Expr.ZShort(lexer.nonlexeme.integer.number16[Short] <* (parsley.character.satisfy(it => it == 's' || it == 'S') <* lexer.space.whiteSpace))),
       atomic(ast.Expr.ZLong(lexer.nonlexeme.integer.number64[Long] <* (parsley.character.satisfy(it => it == 'l' || it == 'L') <* lexer.space.whiteSpace))),
@@ -229,8 +228,6 @@ class Parser(val fileInfo: FileInfo):
       ast.Expr.ZScoreboardVariable(parsley.character.char('$') *> scoreboardResource),
       ast.Expr.ZMacroVariable(parsley.character.char('%') *> lexeme.names.identifier),
       atomic(ast.Expr.ZVariable(ziglinResource))
-
-
     )
   }
 
@@ -466,7 +463,7 @@ class Parser(val fileInfo: FileInfo):
     val newParser = Parser(newInfo)
     val fileData = java.nio.file.Files.readString(newPath, StandardCharsets.UTF_8)
     lexer.fully(Parsley.many(newParser.decl)).parse(fileData) match
-      case Success(x) => fileInfo.pos.map(p => ast.Decl(ast.Decl.IncludedItems(name, x), p))
+      case Success(x) => fileInfo.pos.map(p => ast.Decl.IncludedItems(p, name, x))
       case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file $newPath:", failure.msg.toString)
 
   lazy val fnPrefixType: Parsley[ast.ReturnType] =

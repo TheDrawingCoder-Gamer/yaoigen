@@ -17,93 +17,65 @@ object ast:
   object UnresolvedResource extends generic.ParserBridge3[Option[String], List[String], String, UnresolvedResource]
 
   object bridge:
+    import parsley.lift.*
     type Pos = Location
 
-    trait PosBridge0[+Z]:
+    trait PosSingleton[+A]:
+      def con(pos: Pos): A
+
+      final def <#(op: Parsley[?])(using f: FileInfo): Parsley[A] = f.pos.map(this.con) <~ op
+
+    trait PosBridge0[+Z] extends PosSingleton[Z]:
       def apply(pos: Pos): Z
 
-      def <#(name: Parsley[?])(using f: FileInfo): Parsley[Z] = f.pos.map(p => this.apply(p)) <~ name
+      override final def con(pos: Pos): Z = apply(pos)
 
-    trait PosBridge1[-A, +Z]:
+    trait PosBridge1[-A, +Z] extends PosSingleton[A => Z]:
+      override final def con(pos: Pos): A => Z = this.apply(pos, _)
+
       def apply(pos: Pos, a: A): Z
 
-      def apply(a: Parsley[A])(using f: FileInfo): Parsley[Z] = f.pos <**> a.map(a => pos => this.apply(pos, a))
+      def apply(a: Parsley[A])(using f: FileInfo): Parsley[Z] =
+        f.pos <**> a.map(a => this.apply(_, a))
 
+    trait PosBridge2[-A, -B, +Z] extends PosSingleton[(A, B) => Z]:
+      override final def con(pos: Pos): (A, B) => Z = this.apply(pos, _, _)
 
+      def apply(pos: Pos, a: A, b: B): Z
 
-    trait NestedBridge[Y, +Z]:
-      def wrap(it: Y)(pos: Pos): Z
+      def apply(a: Parsley[A], b: Parsley[B])(using f: FileInfo): Parsley[Z] =
+        f.pos <**> (a, b).mapN((a, b) => this.apply(_, a, b))
 
-    trait NestedSingleton[X, +Y, +Z] extends NestedBridge[X, Z]:
-      def con(pos: Pos): Y
-      def <#(name: Parsley[?])(using f: FileInfo): Parsley[Y] = f.pos.map(p => this.con(p)) <* name
+      def apply(a: Parsley[A])(using f: FileInfo): Parsley[B => Z] =
+        f.pos <**> a.map(a => pos => b => this.apply(pos, a, b))
 
-    trait NestedObject[Y, +Z] extends NestedSingleton[Y, Z, Z]:
-      def con: Y
-      override def con(pos: Pos): Z = this.wrap(this.con)(pos)
+    trait PosBridge3[-A, -B, -C, +Z] extends PosSingleton[(A, B, C) => Z]:
+      override final def con(pos: Pos): (A, B, C) => Z = this.apply(pos, _, _, _)
 
-    trait NestedBridge0[Y, +Z] extends NestedSingleton[Y, Z, Z]:
-      this: Y =>
-      override def con(pos: Pos): Z = this.wrap(this)(pos)
+      def apply(pos: Pos, a: A, b: B, c: C): Z
 
-    trait NestedBridge1[-A, Y, +Z] extends NestedSingleton[Y, A => Z, Z]:
-      def apply(x: A): Y
-      def apply(x: Parsley[A])(using f: FileInfo): Parsley[Z] = f.pos <**> x.map((it) => p => this.wrap(this.apply(it))(p))
-      override def con(pos: Pos): A => Z = a => this.wrap(this.apply(a))(pos)
+      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C])(using f: FileInfo): Parsley[Z] =
+        f.pos <**> (a, b, c).mapN((a, b, c) => this.apply(_, a, b, c))
 
-    trait NestedBridge2[-A, -B, Y, +Z] extends NestedSingleton[Y, (A, B) => Z, Z]:
-      def apply(x: A, y: B): Y
+      def apply(a: Parsley[A])(using f: FileInfo): Parsley[(B, C) => Z] =
+        f.pos <**> a.map(a => pos => (b, c) => this.apply(pos, a, b, c))
 
-      def apply(a: Parsley[A], b: Parsley[B])(using f: FileInfo): Parsley[Z] = {
-        f.pos <**> (a, b).zipped((a, b) => this.wrap(this.apply(a, b)))
-      }
+    trait PosBridge4[-A, -B, -C, -D, +Z] extends PosSingleton[(A, B, C, D) => Z]:
+      override final def con(pos: Pos): (A, B, C, D) => Z = this.apply(pos, _, _, _, _)
 
-      def apply(a: Parsley[A])(using f: FileInfo): Parsley[B => Z] = f.pos <**> a.map(a => pos => b => this.wrap(this.apply(a, b))(pos))
+      def apply(pos: Pos, a: A, b: B, c: C, d: D): Z
 
+      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D])(using f: FileInfo): Parsley[Z] =
+        f.pos <**> (a, b, c, d).mapN((a, b, c, d) => this.apply(_, a, b, c, d))
 
-      override def con(pos: Pos): (A, B) => Z = (a, b) => this.wrap(this.apply(a, b))(pos)
+    trait PosBridge5[-A, -B, -C, -D, -E, +Z] extends PosSingleton[(A, B, C, D, E) => Z]:
+      override final def con(pos: Pos): (A, B, C, D, E) => Z = this.apply(pos, _, _, _, _, _)
 
-    trait NestedBridge3[-A, -B, -C, Y, +Z] extends NestedSingleton[Y, (A, B, C) => Z, Z]:
-      def apply(x: A, y: B, c: C): Y
+      def apply(pos: Pos, a: A, b: B, c: C, d: D, e: E): Z
 
-      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C])(using f: FileInfo): Parsley[Z] = {
-        f.pos <**> (a, b, c).zipped((a, b, c) => this.wrap(this.apply(a, b, c)))
-      }
+      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D], e: Parsley[E])(using f: FileInfo): Parsley[Z] =
+        f.pos <**> (a, b, c, d, e).mapN((a, b, c, d, e) => this.apply(_, a, b, c, d, e))
 
-      def apply(a: Parsley[A])(using f: FileInfo): Parsley[(B, C) => Z] = f.pos <**> a.map(a => p => (b, c) => this.wrap(apply(a, b, c))(p))
-
-
-      override def con(pos: Pos): (A, B, C) => Z = (a, b, c) => this.wrap(this.apply(a, b, c))(pos)
-
-    trait NestedBridge4[-A, -B, -C, -D, Y, +Z] extends NestedSingleton[Y, (A, B, C, D) => Z, Z]:
-      def apply(x: A, y: B, c: C, d: D): Y
-
-      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D])(using f: FileInfo): Parsley[Z] = {
-        f.pos <**> (a, b, c, d).zipped((a, b, c, d) => this.wrap(this.apply(a, b, c, d)))
-      }
-
-      override def con(pos: Pos): (A, B, C, D) => Z = (a, b, c, d) => this.wrap(this.apply(a, b, c, d))(pos)
-
-    trait NestedBridge5[-A, -B, -C, -D, -E, Y, +Z] extends NestedSingleton[Y, (A, B, C, D, E) => Z, Z]:
-      def apply(x: A, y: B, c: C, d: D, e: E): Y
-
-      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D], e: Parsley[E])(using f: FileInfo): Parsley[Z] = {
-        f.pos <**> (a, b, c, d, e).zipped((a, b, c, d, e) => this.wrap(this.apply(a, b, c, d, e)))
-      }
-
-      override def con(pos: Pos): (A, B, C, D, E) => Z = (a, b, c, d, e) => this.wrap(this.apply(a, b, c, d, e))(pos)
-
-    trait ExprWrap extends NestedBridge[ExprNode, Expr]:
-      override def wrap(it: ExprNode)(pos: Pos): Expr = Expr(it, pos)
-
-    trait InsertedExprWrap extends NestedBridge[InsertedExprNode, InsertedExpr]:
-      override def wrap(it: InsertedExprNode)(pos: Pos): InsertedExpr = InsertedExpr(it, pos)
-
-    trait StmtWrap extends NestedBridge[StmtNode, Stmt]:
-      override def wrap(it: StmtNode)(pos: Pos): Stmt = Stmt(it, pos)
-
-    trait DeclWrap extends NestedBridge[DeclNode, Decl]:
-      override def wrap(it: DeclNode)(pos: Pos): Decl = Decl(it, pos)
 
 
   sealed trait BinopKind extends generic.ParserBridge0[BinopKind]
@@ -139,74 +111,70 @@ object ast:
   case class FunctionCall(path: UnresolvedResource, args: List[Expr])
   object FunctionCall extends generic.ParserBridge2[UnresolvedResource, List[Expr], FunctionCall]
 
-  sealed trait ExprNode:
-    def unknownLocation: Expr =
-      Expr(this, Location.blank)
+  sealed trait Expr:
+    def pos: bridge.Pos
   object Expr:
-    object Node:
-      def unapply(x: Expr): Option[ExprNode] =
-        Some(x.expr)
 
-    case class Binop(name: BinopKind, l: Expr, r: Expr) extends ExprNode
-    object Binop extends bridge.NestedBridge3[BinopKind, Expr, Expr, ExprNode, Expr], bridge.ExprWrap
+    case class Binop(pos: bridge.Pos, name: BinopKind, l: Expr, r: Expr) extends Expr
+    object Binop extends bridge.PosBridge3[BinopKind, Expr, Expr, Expr]
 
-    case class Unary(kind: UnaryKind, expr: Expr) extends ExprNode
-    object Unary extends bridge.NestedBridge2[UnaryKind, Expr, ExprNode, Expr], bridge.ExprWrap
+    case class Unary(pos: bridge.Pos, kind: UnaryKind, expr: Expr) extends Expr
+    object Unary extends bridge.PosBridge2[UnaryKind, Expr, Expr]
 
-    case class ZString(contents: String) extends ExprNode
-    object ZString extends bridge.NestedBridge1[String, ExprNode, Expr], bridge.ExprWrap
+    case class ZString(pos: bridge.Pos, contents: String) extends Expr
+    object ZString extends bridge.PosBridge1[String, Expr]
 
-    case class ZByte(num: Byte) extends ExprNode
-    object ZByte extends bridge.NestedBridge1[Byte, ExprNode, Expr], bridge.ExprWrap
+    case class ZByte(pos: bridge.Pos, num: Byte) extends Expr
+    object ZByte extends bridge.PosBridge1[Byte, Expr]
 
-    case class ZShort(num: Short) extends ExprNode
-    object ZShort extends bridge.NestedBridge1[Short, ExprNode, Expr], bridge.ExprWrap
+    case class ZShort(pos: bridge.Pos, num: Short) extends Expr
+    object ZShort extends bridge.PosBridge1[Short, Expr]
 
-    case class ZInt(num: Int) extends ExprNode
-    object ZInt extends bridge.NestedBridge1[Int, ExprNode, Expr], bridge.ExprWrap
+    case class ZInt(pos: bridge.Pos, num: Int) extends Expr
+    object ZInt extends bridge.PosBridge1[Int, Expr]
 
-    case class ZLong(num: Long) extends ExprNode
-    object ZLong extends bridge.NestedBridge1[Long, ExprNode, Expr], bridge.ExprWrap
+    case class ZLong(pos: bridge.Pos, num: Long) extends Expr
+    object ZLong extends bridge.PosBridge1[Long, Expr]
 
-    case class ZFloat(num: Float) extends ExprNode
-    object ZFloat extends bridge.NestedBridge1[Float, ExprNode, Expr], bridge.ExprWrap
+    case class ZFloat(pos: bridge.Pos, num: Float) extends Expr
+    object ZFloat extends bridge.PosBridge1[Float, Expr]
 
-    case class ZDouble(num: Double) extends ExprNode
-    object ZDouble extends bridge.NestedBridge1[Double, ExprNode, Expr], bridge.ExprWrap
+    case class ZDouble(pos: bridge.Pos, num: Double) extends Expr
+    object ZDouble extends bridge.PosBridge1[Double, Expr]
 
-    case class ZBool(num: Boolean) extends ExprNode
-    object ZBool extends bridge.NestedBridge1[Boolean, ExprNode, Expr], bridge.ExprWrap
+    case class ZBool(pos: bridge.Pos, num: Boolean) extends Expr
+    object ZBool extends bridge.PosBridge1[Boolean, Expr]
 
-    case class ZList(kind: ArrayKind, values: List[Expr]) extends ExprNode
-    object ZList extends bridge.NestedBridge2[ArrayKind, List[Expr], ExprNode, Expr], bridge.ExprWrap
+    case class ZList(pos: bridge.Pos, kind: ArrayKind, values: List[Expr]) extends Expr
+    object ZList extends bridge.PosBridge2[ArrayKind, List[Expr], Expr]
 
-    case class ZCompound(map: Map[String, Expr]) extends ExprNode
-    object ZCompound extends bridge.NestedBridge1[Map[String, Expr], ExprNode, Expr], bridge.ExprWrap
+    case class ZCompound(pos: bridge.Pos, map: Map[String, Expr]) extends Expr
+    object ZCompound extends bridge.PosBridge1[Map[String, Expr], Expr]
 
-    case class ZVariable(path: UnresolvedResource) extends ExprNode
-    object ZVariable extends bridge.NestedBridge1[UnresolvedResource, ExprNode, Expr], bridge.ExprWrap
+    case class ZVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr
+    object ZVariable extends bridge.PosBridge1[UnresolvedResource, Expr]
 
-    case class ZScoreboardVariable(path: UnresolvedResource) extends ExprNode
-    object ZScoreboardVariable extends bridge.NestedBridge1[UnresolvedResource, ExprNode, Expr], bridge.ExprWrap
+    case class ZScoreboardVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr
+    object ZScoreboardVariable extends bridge.PosBridge1[UnresolvedResource, Expr]
 
-    case class ZMacroVariable(name: String) extends ExprNode
-    object ZMacroVariable extends bridge.NestedBridge1[String, ExprNode, Expr], bridge.ExprWrap
+    case class ZMacroVariable(pos: bridge.Pos, name: String) extends Expr
+    object ZMacroVariable extends bridge.PosBridge1[String, Expr]
 
-    case class ZFunctionCall(functionCall: FunctionCall) extends ExprNode
-    object ZFunctionCall extends bridge.NestedBridge1[FunctionCall, ExprNode, Expr], bridge.ExprWrap
+    case class ZFunctionCall(pos: bridge.Pos, functionCall: FunctionCall) extends Expr
+    object ZFunctionCall extends bridge.PosBridge1[FunctionCall, Expr]
 
-    case class Atom(expr: Expr) extends ExprNode
-    object Atom extends bridge.NestedBridge1[Expr, ExprNode, Expr], bridge.ExprWrap
+    case class Atom(pos: bridge.Pos, expr: Expr) extends Expr
+    object Atom extends bridge.PosBridge1[Expr, Expr]
 
-    case class ZBuiltinCall(call: BuiltinCall) extends ExprNode
-    object ZBuiltinCall extends bridge.NestedBridge1[BuiltinCall, ExprNode, Expr], bridge.ExprWrap
+    case class ZBuiltinCall(pos: bridge.Pos, call: BuiltinCall) extends Expr
+    object ZBuiltinCall extends bridge.PosBridge1[BuiltinCall, Expr]
 
-    object ZTrue extends bridge.NestedObject[ExprNode, Expr], bridge.ExprWrap {
-      def con = ZBool(true)
+    object ZTrue extends bridge.PosSingleton[Expr] {
+      def con(pos: bridge.Pos): Expr = ZBool(pos, true)
     }
 
-    object ZFalse extends bridge.NestedObject[ExprNode, Expr], bridge.ExprWrap {
-      def con = ZBool(false)
+    object ZFalse extends bridge.PosSingleton[Expr] {
+      def con(pos: bridge.Pos): Expr = ZBool(pos, false)
     }
 
     
@@ -222,8 +190,6 @@ object ast:
     object Range extends generic.ParserBridge3[Expr, Boolean, Expr, ForRange]
 
 
-  case class Expr(expr: ExprNode, pos: bridge.Pos)
-
 
   case class BuiltinCall(name: String, args: List[Expr])
   object BuiltinCall extends generic.ParserBridge2[String, List[Expr], BuiltinCall]
@@ -236,33 +202,32 @@ object ast:
     case class Inserted(expr: InsertedExpr) extends CommandPart
     object Inserted extends generic.ParserBridge1[InsertedExpr, CommandPart]
 
-  sealed trait InsertedExprNode
+  sealed trait InsertedExpr:
+    def pos: bridge.Pos
   object InsertedExpr:
-    case class MacroVariable(name: String) extends InsertedExprNode
-    object MacroVariable extends bridge.NestedBridge1[String, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
+    case class MacroVariable(pos: bridge.Pos, name: String) extends InsertedExpr
+    object MacroVariable extends bridge.PosBridge1[String, InsertedExpr]
 
-    case class ScoreboardVariable(path: UnresolvedResource) extends InsertedExprNode
-    object ScoreboardVariable extends bridge.NestedBridge1[UnresolvedResource, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
+    case class ScoreboardVariable(pos: bridge.Pos, path: UnresolvedResource) extends InsertedExpr
+    object ScoreboardVariable extends bridge.PosBridge1[UnresolvedResource, InsertedExpr]
 
     //case class ZFunctionCall(functionCall: FunctionCall) extends InsertedExprNode
     //object ZFunctionCall extends bridge.NestedBridge1[FunctionCall, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
 
-    case class ResourceRef(resource: UnresolvedResource) extends InsertedExprNode
-    object ResourceRef extends bridge.NestedBridge1[UnresolvedResource, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
+    case class ResourceRef(pos: bridge.Pos, resource: UnresolvedResource) extends InsertedExpr
+    object ResourceRef extends bridge.PosBridge1[UnresolvedResource, InsertedExpr]
 
     //case class FunctionRef(path: Option[UnresolvedResource]) extends InsertedExprNode
     //object FunctionRef extends bridge.NestedBridge1[Option[UnresolvedResource], InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
 
-    case class ZBlock(mayBeInlined: Boolean, stmts: List[Stmt]) extends InsertedExprNode
-    object ZBlock extends bridge.NestedBridge2[Boolean, List[Stmt], InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
+    case class ZBlock(pos: bridge.Pos, mayBeInlined: Boolean, stmts: List[Stmt]) extends InsertedExpr
+    object ZBlock extends bridge.PosBridge2[Boolean, List[Stmt], InsertedExpr]
 
-    case class ZBuiltinCall(call: BuiltinCall) extends InsertedExprNode
-    object ZBuiltinCall extends bridge.NestedBridge1[BuiltinCall, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
-
-
+    case class ZBuiltinCall(pos: bridge.Pos, call: BuiltinCall) extends InsertedExpr
+    object ZBuiltinCall extends bridge.PosBridge1[BuiltinCall, InsertedExpr]
 
 
-  case class InsertedExpr(node: InsertedExprNode, pos: bridge.Pos)
+
 
   case class IfStatement(cond: Expr, block: List[Stmt], child: Option[ElseStatement])
   object IfStatement extends generic.ParserBridge3[Expr, List[Stmt], Option[ElseStatement], IfStatement]
@@ -274,30 +239,33 @@ object ast:
     case class Block(stmts: List[Stmt]) extends ElseStatement
     object Block extends generic.ParserBridge1[List[Stmt], ElseStatement]
 
-  sealed trait StmtNode
+  sealed trait Stmt:
+    def pos: bridge.Pos
   object Stmt:
-    case class Eval(expr: Expr) extends StmtNode
-    object Eval extends bridge.NestedBridge1[Expr, StmtNode, Stmt], bridge.StmtWrap
+    case class Eval(pos: bridge.Pos, expr: Expr) extends Stmt
+    object Eval extends bridge.PosBridge1[Expr, Stmt]
 
-    case class Command(parts: List[CommandPart]) extends StmtNode
-    object Command extends bridge.NestedBridge1[List[CommandPart], StmtNode, Stmt], bridge.StmtWrap
+    case class Command(pos: bridge.Pos, parts: List[CommandPart]) extends Stmt
+    object Command extends bridge.PosBridge1[List[CommandPart], Stmt]
 
-    case class ZIf(ifStatement: IfStatement) extends StmtNode
-    object ZIf extends bridge.NestedBridge1[IfStatement, StmtNode, Stmt], bridge.StmtWrap
+    case class ZIf(pos: bridge.Pos, ifStatement: IfStatement) extends Stmt
+    object ZIf extends bridge.PosBridge1[IfStatement, Stmt]
 
-    case class ZWhile(cond: Expr, continueExpr: Option[Expr], body: List[Stmt]) extends StmtNode
-    object ZWhile extends bridge.NestedBridge3[Expr, Option[Expr], List[Stmt], StmtNode, Stmt], bridge.StmtWrap
+    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt]) extends Stmt
+    object ZWhile extends bridge.PosBridge3[Expr, Option[Expr], List[Stmt], Stmt]
 
-    case class ZFor(variable: Expr, range: ForRange, body: List[Stmt]) extends StmtNode
-    object ZFor extends bridge.NestedBridge3[Expr, ForRange, List[Stmt], StmtNode, Stmt], bridge.StmtWrap
+    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt]) extends Stmt
+    object ZFor extends bridge.PosBridge3[Expr, ForRange, List[Stmt], Stmt]
 
-    case class ZReturn(expr: Option[Expr]) extends StmtNode
-    object ZReturn extends bridge.NestedBridge1[Option[Expr], StmtNode, Stmt], bridge.StmtWrap
+    case class ZReturn(pos: bridge.Pos, expr: Option[Expr]) extends Stmt
+    object ZReturn extends bridge.PosBridge1[Option[Expr], Stmt]
     
-    case object ZContinue extends StmtNode, bridge.NestedBridge0[StmtNode, Stmt], bridge.StmtWrap
-    case object ZBreak extends StmtNode, bridge.NestedBridge0[StmtNode, Stmt], bridge.StmtWrap
+    case class ZContinue(pos: bridge.Pos) extends Stmt
+    object ZContinue extends bridge.PosBridge0[Stmt]
 
-  case class Stmt(expr: StmtNode, pos: bridge.Pos)
+    case class ZBreak(pos: bridge.Pos) extends Stmt
+    object ZBreak extends bridge.PosBridge0[Stmt]
+
 
   enum ReturnType:
     case Storage, Scoreboard, Direct
@@ -318,30 +286,28 @@ object ast:
     case class Text(name: String, json: io.circe.Json) extends ResourceContent
     case class File(basePath: String, path: String) extends ResourceContent
 
-  sealed trait DeclNode
+  sealed trait Decl:
+    def pos: bridge.Pos
   object Decl:
-    case class Module(name: String, items: List[Decl]) extends DeclNode
-    object Module extends bridge.NestedBridge2[String, List[Decl], DeclNode, Decl], bridge.DeclWrap
+    case class Module(pos: bridge.Pos, name: String, items: List[Decl]) extends Decl
+    object Module extends bridge.PosBridge2[String, List[Decl], Decl]
 
-    case class IncludedItems(from: String, items: List[Decl]) extends DeclNode
-    object IncludedItems extends bridge.NestedBridge2[String, List[Decl], DeclNode, Decl], bridge.DeclWrap
-
-
-    case class ZFunction(returnType: ReturnType, name: String, params: List[Parameter], stmts: List[Stmt]) extends DeclNode
-    object ZFunction extends bridge.NestedBridge4[ReturnType, String, List[Parameter], List[Stmt], DeclNode, Decl], bridge.DeclWrap
-
-    case class ZResource(isAsset: Boolean, kind: String, content: ResourceContent) extends DeclNode
-    object ZResource extends bridge.NestedBridge3[Boolean, String, ResourceContent, DeclNode, Decl], bridge.DeclWrap
-
-    case class ZBuiltinCall(call: BuiltinCall) extends DeclNode
-    object ZBuiltinCall extends bridge.NestedBridge1[BuiltinCall, DeclNode, Decl], bridge.DeclWrap
+    case class IncludedItems(pos: bridge.Pos, from: String, items: List[Decl]) extends Decl
+    object IncludedItems extends bridge.PosBridge2[String, List[Decl], Decl]
 
 
+    case class ZFunction(pos: bridge.Pos, returnType: ReturnType, name: String, params: List[Parameter], stmts: List[Stmt]) extends Decl
+    object ZFunction extends bridge.PosBridge4[ReturnType, String, List[Parameter], List[Stmt], Decl]
+
+    case class ZResource(pos: bridge.Pos, isAsset: Boolean, kind: String, content: ResourceContent) extends Decl
+    object ZResource extends bridge.PosBridge3[Boolean, String, ResourceContent, Decl]
+
+    case class ZBuiltinCall(pos: bridge.Pos, call: BuiltinCall) extends Decl
+    object ZBuiltinCall extends bridge.PosBridge1[BuiltinCall, Decl]
 
 
-  case class Decl(node: DeclNode, pos: bridge.Pos)
 
   case class Namespace(pos: bridge.Pos, name: String, items: List[Decl])
   object Namespace:
     def apply(name: Parsley[String], items: Parsley[List[Decl]])(using f: FileInfo): Parsley[Namespace] =
-      f.pos <**> (name, items).zipped((n, is) => p => Namespace(p, n, is))
+      parsley.lift.lift3(Namespace.apply, f.pos, name, items)

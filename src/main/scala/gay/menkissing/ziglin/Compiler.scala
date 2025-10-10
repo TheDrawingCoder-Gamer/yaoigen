@@ -192,6 +192,9 @@ object Compiler:
           evaluated match
             case EvaluatedCondition.Check(c) => s"return run execute ${c}"
             case EvaluatedCondition.Known(v) => if v then "return 1" else "return 0"
+        case _ =>
+          // unreachable
+          throw CompileError(location, "Unreachable")
 
 
     def toScore(compiler: Compiler, code: mutable.ArrayBuffer[String], namespace: String): (String, ScoreKind) =
@@ -248,6 +251,22 @@ object Compiler:
 
 
 
+
+  case class NumericComparison(
+                              operator: (ScoreboardLocation, ScoreboardLocation) => Condition,
+                              halfOperator: (ScoreboardLocation, Int) => Condition,
+                              constOp: (Int, Int) => Boolean,
+                              inverse: () => NumericComparison
+                              )
+  object NumericComparison:
+    lazy val less: NumericComparison =
+      NumericComparison(Condition.Less.apply, (scoreboard, value) => Condition.Match(scoreboard, MatchRange.Range(None, Some(value - 1))), _ < _, () => greater)
+    lazy val lessEq: NumericComparison =
+      NumericComparison(Condition.LessEq.apply, (scoreboard, value) => Condition.Match(scoreboard, MatchRange.Range(None, Some(value))),_ <= _, () => greaterEq)
+    lazy val greater: NumericComparison =
+      NumericComparison(Condition.Greater.apply, (scoreboard, value) => Condition.Match(scoreboard, MatchRange.Range(Some(value + 1), None)) ,_ > _, () => less)
+    lazy val greaterEq: NumericComparison =
+      NumericComparison(Condition.GreaterEq.apply, (scoreboard, value) => Condition.Match(scoreboard, MatchRange.Range(Some(value), None)),_ >= _, () => lessEq)
 
   enum NbtType(val numeric: Boolean, val storeString: Option[String] = None):
     case Unknown extends NbtType(false)
@@ -374,9 +393,9 @@ object Compiler:
       Builtin.sideEffect("scoreboard") { (compiler, pos, args, location) =>
         val (score, criteria) =
           args match
-            case List(Expr.Node(Expr.ZVariable(path))) =>
+            case List(Expr.ZVariable(_, path)) =>
               (ResourceLocation.resolveResource(location, path), "dummy")
-            case List(Expr(Expr.ZVariable(path), _), Expr(Expr.ZString(crit), _)) =>
+            case List(Expr.ZVariable(_, path), Expr.ZString(_, crit)) =>
               (ResourceLocation.resolveResource(location, path), crit)
             case _ =>
               throw CompileError(pos, "Expected a path and optionally a criteria type.")
@@ -386,7 +405,7 @@ object Compiler:
       Builtin.exprOnly("reset") { (compiler, pos, args) => context ?=>
         val (name, score) =
           args match
-            case List(Expr.Node(Expr.ZString(name)), Expr.Node(Expr.ZVariable(path))) =>
+            case List(Expr.ZString(_, name), Expr.ZVariable(_, path)) =>
               (name, path)
             case _ =>
               throw CompileError(pos, "Expected a name and a path.")
@@ -399,7 +418,7 @@ object Compiler:
       Builtin.exprOnly("enable") { (compiler, pos, args) => context ?=>
         val (name, score) =
           args match
-            case List(Expr.Node(Expr.ZString(name)), Expr.Node(Expr.ZVariable(path))) =>
+            case List(Expr.ZString(_, name), Expr.ZVariable(_, path)) =>
               (name, path)
             case _ =>
               throw CompileError(pos, "Expected a name and a path.")
@@ -412,7 +431,7 @@ object Compiler:
       Builtin.exprOnly("condition") { (compiler, pos, args) => context ?=>
         val checkCode =
           args match
-            case List(Expr.Node(Expr.ZString(name))) =>
+            case List(Expr.ZString(_, name)) =>
               name
             case _ =>
               throw CompileError(pos, "Expected check code (the bit that comes after `if` in execute commands)")
@@ -421,7 +440,7 @@ object Compiler:
       Builtin.insertOnly("scoreboard_string") { (compiler, pos, args) => context ?=>
         val path =
           args match
-            case List(Expr.Node(Expr.ZVariable(path))) =>
+            case List(Expr.ZVariable(_, path)) =>
               path
             case _ =>
               throw CompileError(pos, "Expected path")
@@ -434,11 +453,14 @@ object Compiler:
   trait Builtin:
     val name: String
 
-    def expr(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): Expression
+    def expr(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): Expression =
+      throw CompileError(pos, s"The $name builtin doesn't work in expressions")
 
-    def inserted(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): String
+    def inserted(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): String =
+      throw CompileError(pos, s"The $name builtin doesn't work in inserts")
 
-    def decl(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall, location: ResourceLocation): Unit
+    def decl(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall, location: ResourceLocation): Unit =
+      throw CompileError(pos, s"The $name builtin doesn't work at toplevel")
 
   object Builtin:
     // Side effect that can be in Expr or Decl position
@@ -450,9 +472,6 @@ object Compiler:
           func(compiler, pos, call.args, context.location)
           Expression.void(pos)
 
-        override def inserted(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): String =
-          throw CompileError(pos, s"The $name builtin doesn't work in inserts")
-
         override def decl(compiler: Compiler, pos: Location, call: ast.BuiltinCall, location: ResourceLocation): Unit =
           func(compiler, pos, call.args, location)
 
@@ -460,14 +479,10 @@ object Compiler:
       new Builtin:
         override val name: String = nameArg
 
-        override def expr(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): Expression =
-          throw CompileError(pos, s"The $name builtin doesn't work in expressions")
 
         override def inserted(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): String =
           func(compiler, pos, call.args)
 
-        override def decl(compiler: Compiler, pos: Location, call: ast.BuiltinCall, location: ResourceLocation): Unit =
-          throw CompileError(pos, s"The $name builtin doesn't work at toplevel")
 
     def exprOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.Expr]) => FuncContext ?=> Expression): Builtin =
       new Builtin:
@@ -475,12 +490,6 @@ object Compiler:
 
         override def expr(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): Expression =
           func(compiler, pos, call.args)
-
-        override def inserted(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): String =
-          throw CompileError(pos, s"The $name builtin doesn't work in inserts")
-
-        override def decl(compiler: Compiler, pos: Location, call: ast.BuiltinCall, location: ResourceLocation): Unit =
-          throw CompileError(pos, s"The $name builtin doesn't work at toplevel")
 
   enum ScoreKind:
     case Direct(operation: String)
@@ -766,7 +775,10 @@ object Compiler:
 
         val first = path.head
 
-        items.find { case Item.Module(name, _) => name == first } match
+        items.find {
+          case Item.Module(name, _) => name == first
+          case _ => false
+        } match
           case Some(v: Item.Module) => v.getModule(path.tail)
           case _ =>
             val module = Item.Module(first, mutable.ArrayBuffer())
@@ -787,7 +799,10 @@ object Compiler:
             return items
 
           val first = path.head
-          items.find { case Item.Module(name, _) => name == first } match
+          items.find {
+            case Item.Module(name, _) => name == first
+            case _ => false
+          } match
             case Some(v: Item.Module) => v.getModule(path.tail)
             case _ =>
               val module = Module(first, mutable.ArrayBuffer())
@@ -894,61 +909,61 @@ class Compiler:
       usedScoreboards(name) = criteria
   }
 
-  def registerNamespace(ns: parser.ast.Namespace, parentScope: Int): Unit =
-    val index = pushScope(ns.name, parentScope)
 
-    val resource = ResourceLocation(ns.name, List(), ResourceKind.Module)
+  private object register:
+    private def registerNamespace(ns: parser.ast.Namespace, parentScope: Int): Unit =
+      val index = pushScope(ns.name, parentScope)
 
-    ns.items.foreach: decl =>
-      registerItem(decl, resource, index)
+      val resource = ResourceLocation(ns.name, List(), ResourceKind.Module)
 
-  def register(nses: List[parser.ast.Namespace]): Unit = {
-    scopes.append(Compiler.Scope(0))
-    nses.foreach: ns =>
-      registerNamespace(ns, 0)
+      ns.items.foreach: decl =>
+        registerItem(decl, resource, index)
 
-  }
+    def apply(nses: List[ast.Namespace]): Unit =
+      scopes.append(Compiler.Scope(0))
+      nses.foreach: ns =>
+        registerNamespace(ns, 0)
 
-  def registerItem(item: parser.ast.Decl, location: ResourceLocation, parentScope: Int): Unit = {
-    import parser.ast.Decl.*
-    item.node match
-      case Module(name, items) => registerModule(name, items, location, parentScope)
-      case IncludedItems(_, items) => items.foreach(item => registerItem(item, location, parentScope))
-      case ZFunction(returnType, name, params, stmts) => registerFunction(returnType, name, params, stmts, location, parentScope)
-      case ZResource(_, _, _) => ()
-      case gay.menkissing.ziglin.parser.ast.Decl.ZBuiltinCall(_) => ()
-  }
+    private def registerItem(item: parser.ast.Decl, location: ResourceLocation, parentScope: Int): Unit = {
+      import parser.ast.Decl.*
+      item match
+        case Module(_, name, items) => registerModule(name, items, location, parentScope)
+        case IncludedItems(_, _, items) => items.foreach(item => registerItem(item, location, parentScope))
+        case ZFunction(_, returnType, name, params, stmts) => registerFunction(returnType, name, params, stmts, location, parentScope)
+        case ZResource(_, _, _, _) => ()
+        case ZBuiltinCall(_, _) => ()
+    }
 
-  def registerModule(name: String, items: List[parser.ast.Decl], location: ResourceLocation, parentScope: Int): Unit = {
-    val index = pushScope(name, parentScope)
-    val newLoc = location.copy(modules = location.modules.appended(name))
-    items.foreach: item =>
-      registerItem(item, newLoc, index)
-  }
+    private def registerModule(name: String, items: List[parser.ast.Decl], location: ResourceLocation, parentScope: Int): Unit = {
+      val index = pushScope(name, parentScope)
+      val newLoc = location.copy(modules = location.modules.appended(name))
+      items.foreach: item =>
+        registerItem(item, newLoc, index)
+    }
 
-  def registerFunction(returnType: ReturnType, name: String, params: List[Parameter], stmts: List[parser.ast.Stmt], location: ResourceLocation, parentScope: Int): Unit = {
-      val functionLocation = location.withName(name)
-      val functionPath = functionLocation.toString
+    private def registerFunction(returnType: ReturnType, name: String, params: List[Parameter], stmts: List[parser.ast.Stmt], location: ResourceLocation, parentScope: Int): Unit = {
+        val functionLocation = location.withName(name)
+        val functionPath = functionLocation.toString
 
-      if params.exists(_.kind == ParameterKind.Scoreboard) then
-        useScoreboard(ScoreboardLocation(functionLocation, "").scoreboardString)
+        if params.exists(_.kind == ParameterKind.Scoreboard) then
+          useScoreboard(ScoreboardLocation(functionLocation, "").scoreboardString)
 
-      val definition = FunctionDefinition(
-        functionLocation,
-        params,
-        returnType
-      )
+        val definition = FunctionDefinition(
+          functionLocation,
+          params,
+          returnType
+        )
 
-      addFunction(parentScope, name, location)
+        addFunction(parentScope, name, location)
 
-      functionRegistry(functionLocation) = definition
+        functionRegistry(functionLocation) = definition
 
-      if name == "tick" && location.modules.isEmpty then
-        tickFunctions.append(functionPath)
-      else if name == "load" && location.modules.isEmpty then
-        loadFunctions.append(functionPath)
+        if name == "tick" && location.modules.isEmpty then
+          tickFunctions.append(functionPath)
+        else if name == "load" && location.modules.isEmpty then
+          loadFunctions.append(functionPath)
 
-  }
+    }
 
   def addItem(location: ResourceLocation, item: FileTree.Item): Unit =
     val items = getLocation(location)
@@ -964,27 +979,27 @@ class Compiler:
 
   def compileItem(ast: parser.ast.Decl, location: ResourceLocation): Unit =
     import parser.ast.Decl.*
-    ast.node match
-      case func: ZFunction => compileAstFunction(ast.pos, func, location)
+    ast match
+      case func: ZFunction => compileAstFunction(func, location)
       case module: parser.ast.Decl.Module => compileModule(module, location)
       case incl: IncludedItems => incl.items.foreach(it => compileItem(it, location))
-      case resource: ZResource => compileResource(ast.pos, resource, location)
-      case ZBuiltinCall(call) => builtins.compileDecl(ast.pos, call, location)
+      case resource: ZResource => compileResource(resource, location)
+      case ZBuiltinCall(pos, call) => builtins.compileDecl(pos, call, location)
 
-  def compileResource(pos: util.Location, resource: ZResource, location: ResourceLocation): Unit =
+  def compileResource(resource: ZResource, location: ResourceLocation): Unit =
     import parser.ast.ResourceContent
     resource.content match
       case ResourceContent.Text(name, json) =>
         val compiled = json.spaces4
-        val resource2 = FileTree.Item.ZTextResource(name, resource.kind, resource.isAsset, compiled, pos)
+        val resource2 = FileTree.Item.ZTextResource(name, resource.kind, resource.isAsset, compiled, resource.pos)
         addItem(location, resource2)
       case ResourceContent.File(path, file) =>
         val filePath = Path.of(path).getParent
-        val resource2 = FileTree.Item.ZFileResource(resource.kind, resource.isAsset, filePath.resolve(file).toString, pos)
+        val resource2 = FileTree.Item.ZFileResource(resource.kind, resource.isAsset, filePath.resolve(file).toString, resource.pos)
         addItem(location, resource2)
 
 
-  private def compileAstFunction(pos: util.Location, func: parser.ast.Decl.ZFunction, location: ResourceLocation): Unit =
+  private def compileAstFunction(func: parser.ast.Decl.ZFunction, location: ResourceLocation): Unit =
     val fnLocation = location.withName(func.name)
     val hasMacroArgs = func.params.exists(_.kind == ParameterKind.Macro)
     val context = FuncContext(fnLocation, func.returnType)
@@ -993,7 +1008,7 @@ class Compiler:
     compileBlock(func.stmts)(using context)
     // TODO: comptime
 
-    addFunctionItem(pos, context.location, context.code.toList)
+    addFunctionItem(func.pos, context.location, context.code.toList)
 
   private def addFunctionItem(location: util.Location, fnLocation: ResourceLocation, commands: List[String]): Unit =
     val (module, name) = fnLocation.trySplit.get
@@ -1095,13 +1110,13 @@ class Compiler:
     val loopContext =
       forLoop.range match
         case ForRange.Single(n) =>
-          compileAssignment(forLoop.variable.pos, forLoop.variable, Expr.ZInt(0).unknownLocation)
+          compileAssignment(forLoop.variable, Expr.ZInt(util.Location.blank, 0))
 
-          LoopContext(Some(Expr.Binop(ast.BinopKind.Less, forLoop.variable, n).unknownLocation), Some(Expr.Binop(ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(1).unknownLocation).unknownLocation), func)
+          LoopContext(Some(Expr.Binop(util.Location.blank, ast.BinopKind.Less, forLoop.variable, n)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(util.Location.blank, 1))), func)
         case ForRange.Range(min, inclusive, max) =>
-          compileAssignment(forLoop.variable.pos, forLoop.variable, min)
+          compileAssignment(forLoop.variable, min)
 
-          LoopContext(Some(Expr.Binop(if inclusive then ast.BinopKind.LessEq else ast.BinopKind.Less, forLoop.variable, max).unknownLocation), Some(Expr.Binop(ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(1).unknownLocation).unknownLocation), func)
+          LoopContext(Some(Expr.Binop(util.Location.blank, if inclusive then ast.BinopKind.LessEq else ast.BinopKind.Less, forLoop.variable, max)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(util.Location.blank, 1))), func)
 
 
     val subContext = context.nested(NestKind.Loop(loopContext), func, None)
@@ -1120,12 +1135,12 @@ class Compiler:
 
 
   def compileStatement(statement: parser.ast.Stmt)(using context: FuncContext): Unit =
-    statement.expr match
-      case Stmt.Eval(expr) => compileExpression(expr, true)
+    statement match
+      case Stmt.Eval(_, expr) => compileExpression(expr, true)
       case x: Stmt.Command =>
-        val cmd = compileCommand(statement.pos, x)
+        val cmd = compileCommand(x)
         context.code.append(cmd)
-      case Stmt.ZIf(ifStatement) =>
+      case Stmt.ZIf(pos, ifStatement) =>
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
@@ -1156,11 +1171,11 @@ class Compiler:
         if subContext.hasNestedReturns.value then
           context.hasNestedReturns.value = true
           generateNestedReturn()
-      case Stmt.ZReturn(expr) => compileReturn(statement.pos, expr)
+      case Stmt.ZReturn(pos, expr) => compileReturn(pos, expr)
       // TODO: these need special handling while nested
-      case Stmt.ZContinue =>
-        compileContinue(statement.pos)
-      case Stmt.ZBreak => ???
+      case Stmt.ZContinue(pos) =>
+        compileContinue(pos)
+      case Stmt.ZBreak(_) => ???
 
   object internals:
     // TODO: do this idiomatically
@@ -1216,17 +1231,17 @@ class Compiler:
     str.split(raw"\r?\n\w*").mkString(" ")
 
   object insertedExpr:
-    def compile(pos: util.Location, part: CommandPart.Inserted)(using context: FuncContext): (String, Boolean) =
-      part.expr.node match
-        case InsertedExpr.MacroVariable(name) =>
+    def compile(part: CommandPart.Inserted)(using context: FuncContext): (String, Boolean) =
+      part.expr match
+        case InsertedExpr.MacroVariable(_, name) =>
           (s"$$(__${name})", true)
-        case InsertedExpr.ScoreboardVariable(path) =>
+        case InsertedExpr.ScoreboardVariable(_, path) =>
           val scoreboard = ScoreboardLocation.resolveResource(context.location, path)
           (scoreboard.mcdisplay, false)
-        case InsertedExpr.ResourceRef(path) =>
+        case InsertedExpr.ResourceRef(_, path) =>
           val resolved = ResourceLocation.resolveResource(context.location, path)
           (resolved.mcdisplay, false)
-        case InsertedExpr.ZBlock(mayBeInlined, stmts) =>
+        case InsertedExpr.ZBlock(_, mayBeInlined, stmts) =>
           val func = nextFunction("block", context.location.namespace)
           val subContext = context.nested(NestKind.Block, func, None)
           compileBlock(stmts)(using subContext)
@@ -1238,11 +1253,11 @@ class Compiler:
             case _ =>
               addFunctionItem(util.Location.blank, func, subContext.code.toList)
               (mcfunc"function ${func}", false)
-        case InsertedExpr.ZBuiltinCall(call) =>
+        case InsertedExpr.ZBuiltinCall(pos, call) =>
           (builtins.compileInserted(pos, call), false)
 
 
-  def compileCommand(pos: util.Location, command: parser.ast.Stmt.Command)(using context: FuncContext): String =
+  def compileCommand(command: parser.ast.Stmt.Command)(using context: FuncContext): String =
     // : )
     var res = ""
     var needsMacro = false
@@ -1250,7 +1265,7 @@ class Compiler:
       case CommandPart.Literal(str) =>
         res = res + cleanCommandString(str)
       case inserted: CommandPart.Inserted =>
-        val (compiled, insertNeedsMacro) = insertedExpr.compile(pos, inserted)
+        val (compiled, insertNeedsMacro) = insertedExpr.compile(inserted)
         res = res + compiled
         needsMacro = needsMacro || insertNeedsMacro
     if needsMacro && !res.startsWith("$") then
@@ -1317,12 +1332,12 @@ class Compiler:
 
     Expression(pos, needsMacro, kind)
 
-  def compileUnaryExpression(pos: util.Location, expr: parser.ast.Expr.Unary)(using context: FuncContext): Expression =
+  def compileUnaryExpression(expr: parser.ast.Expr.Unary)(using context: FuncContext): Expression =
     expr.kind match
-      case UnaryKind.Not => compileNot(pos, expr.expr)
-      case UnaryKind.Negate => compileNegate(pos, expr.expr)
+      case UnaryKind.Not => compileNot(expr.pos, expr.expr)
+      case UnaryKind.Negate => compileNegate(expr.pos, expr.expr)
 
-  def compileNumericOperation(pos: util.Location, left: parser.ast.Expr, operator: ScoreboardOperation, right: parser.ast.Expr)(using context: FuncContext): Expression =
+  def compileNumericOperation(left: parser.ast.Expr, operator: ScoreboardOperation, right: parser.ast.Expr)(using context: FuncContext): Expression =
     val l = compileExpression(left, false)
     val r = compileExpression(right, false)
     val needsMacro = l.needsMacro || r.needsMacro
@@ -1340,12 +1355,12 @@ class Compiler:
           scoreboardOperation(scoreboard, r, operator)
           ExpressionKind.EScoreboard(scoreboard)
 
-    Expression(pos, needsMacro, kind)
+    Expression(left.pos, needsMacro, kind)
 
 
-  def compileOperatorAssignment(pos: util.Location, left: parser.ast.Expr, operator: ScoreboardOperation, right: parser.ast.Expr)(using context: FuncContext): Expression =
-    left.expr match
-      case Expr.ZScoreboardVariable(path) =>
+  def compileOperatorAssignment(left: parser.ast.Expr, operator: ScoreboardOperation, right: parser.ast.Expr)(using context: FuncContext): Expression =
+    left match
+      case Expr.ZScoreboardVariable(_, path) =>
         val r = compileExpression(right, false)
 
         val scoreboard = ScoreboardLocation.resolveResource(context.location, path)
@@ -1354,19 +1369,19 @@ class Compiler:
 
         r
       case _ =>
-        compileAssignment(pos, left, Expr(parser.ast.Expr.Binop(operator.binopKind, left, right), right.pos))
+        compileAssignment(left, parser.ast.Expr.Binop(right.pos, operator.binopKind, left, right))
 
 
-  def compileAssignment(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
-    left.expr match
-      case Expr.ZVariable(path) =>
+  def compileAssignment(left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
+    left match
+      case Expr.ZVariable(_, path) =>
         val r = compileExpression(right, false)
         val storage = StorageLocation.resolveResource(context.location, path)
         setStorage(context.code, storage, r)
 
         r
 
-      case Expr.ZScoreboardVariable(path) =>
+      case Expr.ZScoreboardVariable(_, path) =>
         val r = compileExpression(right, false)
         val scoreboard = ScoreboardLocation.resolveResource(context.location, path)
 
@@ -1374,7 +1389,7 @@ class Compiler:
         useScoreboard(scoreboard.scoreboardString)
 
         r
-      case _ => throw CompileError(pos, "Can only assign to a variable")
+      case _ => throw CompileError(left.pos, "Can only assign to a variable")
 
 
   def compileMatchComparison(code: mutable.ArrayBuffer[String], value: Expression, range: MatchRange, namespace: String): ExpressionKind =
@@ -1390,19 +1405,19 @@ class Compiler:
     )
     ExpressionKind.ECondition(Condition.Match(conditionScoreboard, MatchRange.Single(if checkEquality then 0 else 1)))
 
-  def compileNotEquals(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
+  def compileNotEquals(left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
     val l = compileExpression(left, false)
     val r = compileExpression(right, false)
     val needsMacro = l.needsMacro || r.needsMacro
 
     l.valueEqual(r) match
       case Some(equal) =>
-        Expression(pos, false, ExpressionKind.EBoolean(equal))
+        Expression(left.pos, false, ExpressionKind.EBoolean(equal))
       case _ =>
         val kind =
           (l.kind, r.kind) match
             case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-              throw CompileError(pos, "Cannot compare with void.")
+              throw CompileError(left.pos, "Cannot compare with void.")
             case (ExpressionKind.EStorage(_), _) | (_, ExpressionKind.EStorage(_)) =>
               storageComparison(context.code, l, r, false, context.location.namespace)
             case (leftKind, rightKind) if leftKind.nbtType.numeric && rightKind.nbtType.numeric =>
@@ -1412,21 +1427,21 @@ class Compiler:
             case _ =>
               storageComparison(context.code, l, r, false, context.location.namespace)
 
-        Expression(pos, needsMacro, kind)
+        Expression(left.pos, needsMacro, kind)
 
-  def compileEquals(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
+  def compileEquals(left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
     val l = compileExpression(left, false)
     val r = compileExpression(right, false)
     val needsMacro = l.needsMacro || r.needsMacro
 
     l.valueEqual(r) match
       case Some(equal) =>
-        Expression(pos, false, ExpressionKind.EBoolean(equal))
+        Expression(left.pos, false, ExpressionKind.EBoolean(equal))
       case _ =>
         val kind =
           (l.kind, r.kind) match
             case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-              throw CompileError(pos, "Cannot compare with void.")
+              throw CompileError(left.pos, "Cannot compare with void.")
             case (ExpressionKind.EStorage(_), _) | (_, ExpressionKind.EStorage(_)) =>
               storageComparison(context.code, l, r, true, context.location.namespace)
             case (ExpressionKind.Numeric(v), _) =>
@@ -1440,114 +1455,36 @@ class Compiler:
             case _ =>
               storageComparison(context.code, l, r, true, context.location.namespace)
 
-        Expression(pos, needsMacro, kind)
-  def compileGreaterThanEqual(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
+        Expression(left.pos, needsMacro, kind)
+
+  def compileNumericComparison(left: parser.ast.Expr, right: parser.ast.Expr, comparator: NumericComparison)(using context: FuncContext): Expression =
     val l = compileExpression(left, false)
     val r = compileExpression(right, false)
     val needsMacro = l.needsMacro || r.needsMacro
     val kind =
       (l.kind, r.kind) match
         case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-          throw CompileError(pos, "Cannot compare with void.")
+          throw CompileError(left.pos, "Cannot compare with void.")
         case (ExpressionKind.EBoolean(_), _) | (_, ExpressionKind.EBoolean(_)) =>
-          throw CompileError(pos, "Cannot compare with boolean.")
+          throw CompileError(left.pos, "Cannot compare with boolean.")
         case (ExpressionKind.EString(_), _) | (_, ExpressionKind.EString(_)) =>
-          throw CompileError(pos, "Cannot compare with string.")
+          throw CompileError(left.pos, "Cannot compare with string.")
         case (ExpressionKind.Numeric(lv), ExpressionKind.Numeric(rv)) =>
-          ExpressionKind.EBoolean(lv >= rv)
+          ExpressionKind.EBoolean(comparator.constOp(lv, rv))
         case (ExpressionKind.Numeric(lv), _) =>
           val scoreboard = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(None, Some(lv))))
+          ExpressionKind.ECondition(comparator.inverse().halfOperator(scoreboard, lv))
         case (_, ExpressionKind.Numeric(rv)) =>
           val scoreboard = moveToScoreboard(context.code, l, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(Some(rv), None)))
+          ExpressionKind.ECondition(comparator.halfOperator(scoreboard, rv))
         case _ =>
           val leftScore = moveToScoreboard(context.code, l, context.location.namespace)
           val rightScore = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.GreaterEq(leftScore, rightScore))
+          ExpressionKind.ECondition(comparator.operator(leftScore, rightScore))
 
-    Expression(pos, needsMacro, kind)
+    Expression(left.pos, needsMacro, kind)
 
-  def compileGreaterThan(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
-    val l = compileExpression(left, false)
-    val r = compileExpression(right, false)
-    val needsMacro = l.needsMacro || r.needsMacro
-    val kind =
-      (l.kind, r.kind) match
-        case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-          throw CompileError(pos, "Cannot compare with void.")
-        case (ExpressionKind.EBoolean(_), _) | (_, ExpressionKind.EBoolean(_)) =>
-          throw CompileError(pos, "Cannot compare with boolean.")
-        case (ExpressionKind.EString(_), _) | (_, ExpressionKind.EString(_)) =>
-          throw CompileError(pos, "Cannot compare with string.")
-        case (ExpressionKind.Numeric(lv), ExpressionKind.Numeric(rv)) =>
-          ExpressionKind.EBoolean(lv > rv)
-        case (ExpressionKind.Numeric(lv), _) =>
-          val scoreboard = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(None, Some(lv - 1))))
-        case (_, ExpressionKind.Numeric(rv)) =>
-          val scoreboard = moveToScoreboard(context.code, l, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(Some(rv + 1), None)))
-        case _ =>
-          val leftScore = moveToScoreboard(context.code, l, context.location.namespace)
-          val rightScore = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Greater(leftScore, rightScore))
 
-    Expression(pos, needsMacro, kind)
-
-  def compileLessThanEqual(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
-    val l = compileExpression(left, false)
-    val r = compileExpression(right, false)
-    val needsMacro = l.needsMacro || r.needsMacro
-    val kind =
-      (l.kind, r.kind) match
-        case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-          throw CompileError(pos, "Cannot compare with void.")
-        case (ExpressionKind.EBoolean(_), _) | (_, ExpressionKind.EBoolean(_)) =>
-          throw CompileError(pos, "Cannot compare with boolean.")
-        case (ExpressionKind.EString(_), _) | (_, ExpressionKind.EString(_)) =>
-          throw CompileError(pos, "Cannot compare with string.")
-        case (ExpressionKind.Numeric(lv), ExpressionKind.Numeric(rv)) =>
-          ExpressionKind.EBoolean(lv <= rv)
-        case (ExpressionKind.Numeric(lv), _) =>
-          val scoreboard = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(Some(lv), None)))
-        case (_, ExpressionKind.Numeric(rv)) =>
-          val scoreboard = moveToScoreboard(context.code, l, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(None, Some(rv))))
-        case _ =>
-          val leftScore = moveToScoreboard(context.code, l, context.location.namespace)
-          val rightScore = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.LessEq(leftScore, rightScore))
-
-    Expression(pos, needsMacro, kind)
-
-  def compileLessThan(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
-    val l = compileExpression(left, false)
-    val r = compileExpression(right, false)
-    val needsMacro = l.needsMacro || r.needsMacro
-    val kind =
-      (l.kind, r.kind) match
-        case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-          throw CompileError(pos, "Cannot compare with void.")
-        case (ExpressionKind.EBoolean(_), _) | (_, ExpressionKind.EBoolean(_)) =>
-          throw CompileError(pos, "Cannot compare with boolean.")
-        case (ExpressionKind.EString(_), _) | (_, ExpressionKind.EString(_)) =>
-          throw CompileError(pos, "Cannot compare with string.")
-        case (ExpressionKind.Numeric(lv), ExpressionKind.Numeric(rv)) =>
-          ExpressionKind.EBoolean(lv < rv)
-        case (ExpressionKind.Numeric(lv), _) =>
-          val scoreboard = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(Some(lv + 1), None)))
-        case (_, ExpressionKind.Numeric(rv)) =>
-          val scoreboard = moveToScoreboard(context.code, l, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Match(scoreboard, MatchRange.Range(None, Some(rv - 1))))
-        case _ =>
-          val leftScore = moveToScoreboard(context.code, l, context.location.namespace)
-          val rightScore = moveToScoreboard(context.code, r, context.location.namespace)
-          ExpressionKind.ECondition(Condition.Less(leftScore, rightScore))
-
-    Expression(pos, needsMacro, kind)
 
 
   def compileLogicalOr(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression =
@@ -1578,27 +1515,27 @@ class Compiler:
 
     Expression(pos, needsMacro, kind)
 
-  def compileBinaryExpression(pos: util.Location, expr: parser.ast.Expr.Binop)(using context: FuncContext): Expression =
+  def compileBinaryExpression(expr: parser.ast.Expr.Binop)(using context: FuncContext): Expression =
     expr.name match
-      case BinopKind.Equals => compileEquals(pos, expr.l, expr.r)
-      case BinopKind.Unequal => compileNotEquals(pos, expr.l, expr.r)
-      case BinopKind.Greater => compileGreaterThan(pos, expr.l, expr.r)
-      case BinopKind.GreaterEq => compileGreaterThanEqual(pos, expr.l, expr.r)
-      case BinopKind.Less => compileLessThan(pos, expr.l, expr.r)
-      case BinopKind.LessEq => compileLessThanEqual(pos, expr.l, expr.r)
-      case BinopKind.Plus => compileNumericOperation(pos, expr.l, ScoreboardOperation.Add, expr.r)
-      case BinopKind.Minus => compileNumericOperation(pos, expr.l, ScoreboardOperation.Sub, expr.r)
-      case BinopKind.Times => compileNumericOperation(pos, expr.l, ScoreboardOperation.Mul, expr.r)
-      case BinopKind.Divide => compileNumericOperation(pos, expr.l, ScoreboardOperation.Div, expr.r)
-      case BinopKind.Modulo => compileNumericOperation(pos, expr.l, ScoreboardOperation.Mod, expr.r)
-      case BinopKind.And => compileLogicalAnd(pos, expr.l, expr.r)
-      case BinopKind.Or => compileLogicalOr(pos, expr.l, expr.r)
-      case BinopKind.Assign => compileAssignment(pos, expr.l, expr.r)
-      case BinopKind.AddAssign => compileOperatorAssignment(pos, expr.l, ScoreboardOperation.Add, expr.r)
-      case BinopKind.SubAssign => compileOperatorAssignment(pos, expr.l, ScoreboardOperation.Sub, expr.r)
-      case BinopKind.MulAssign => compileOperatorAssignment(pos, expr.l, ScoreboardOperation.Mul, expr.r)
-      case BinopKind.DivAssign => compileOperatorAssignment(pos, expr.l, ScoreboardOperation.Div, expr.r)
-      case BinopKind.ModAssign => compileOperatorAssignment(pos, expr.l, ScoreboardOperation.Mod, expr.r)
+      case BinopKind.Equals => compileEquals(expr.l, expr.r)
+      case BinopKind.Unequal => compileNotEquals(expr.l, expr.r)
+      case BinopKind.Greater => compileNumericComparison(expr.l, expr.r, NumericComparison.greater)
+      case BinopKind.GreaterEq => compileNumericComparison(expr.l, expr.r, NumericComparison.greaterEq)
+      case BinopKind.Less => compileNumericComparison(expr.l, expr.r, NumericComparison.less)
+      case BinopKind.LessEq => compileNumericComparison(expr.l, expr.r, NumericComparison.lessEq)
+      case BinopKind.Plus => compileNumericOperation(expr.l, ScoreboardOperation.Add, expr.r)
+      case BinopKind.Minus => compileNumericOperation(expr.l, ScoreboardOperation.Sub, expr.r)
+      case BinopKind.Times => compileNumericOperation(expr.l, ScoreboardOperation.Mul, expr.r)
+      case BinopKind.Divide => compileNumericOperation(expr.l, ScoreboardOperation.Div, expr.r)
+      case BinopKind.Modulo => compileNumericOperation(expr.l, ScoreboardOperation.Mod, expr.r)
+      case BinopKind.And => compileLogicalAnd(expr.pos, expr.l, expr.r)
+      case BinopKind.Or => compileLogicalOr(expr.pos, expr.l, expr.r)
+      case BinopKind.Assign => compileAssignment(expr.l, expr.r)
+      case BinopKind.AddAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Add, expr.r)
+      case BinopKind.SubAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Sub, expr.r)
+      case BinopKind.MulAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Mul, expr.r)
+      case BinopKind.DivAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Div, expr.r)
+      case BinopKind.ModAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Mod, expr.r)
 
   def compileFunctionCall(pos: util.Location, functionCall: parser.ast.FunctionCall)(using context: FuncContext): (String, CalledFunction) =
     val path = ResourceLocation.resolveResource(context.location.module, functionCall.path)
@@ -1780,26 +1717,26 @@ class Compiler:
 
 
   def compileExpression(expr: ast.Expr, ignored: Boolean)(using context: FuncContext): Expression =
-    expr.expr match
-      case s @ Expr.Binop(name, l, r) => compileBinaryExpression(expr.pos, s)
-      case s @ Expr.Unary(kind, operand) => compileUnaryExpression(expr.pos, s)
-      case Expr.ZString(contents) => Expression(expr.pos, false, ExpressionKind.EString(contents))
-      case Expr.ZByte(num) => Expression(expr.pos, false, ExpressionKind.EByte(num))
-      case Expr.ZShort(num) => Expression(expr.pos, false, ExpressionKind.EShort(num))
-      case Expr.ZInt(num) => Expression(expr.pos, false, ExpressionKind.EInteger(num))
-      case Expr.ZLong(num) => Expression(expr.pos, false, ExpressionKind.ELong(num))
-      case Expr.ZFloat(num) => Expression(expr.pos, false, ExpressionKind.EFloat(num))
-      case Expr.ZDouble(num) => Expression(expr.pos, false, ExpressionKind.EDouble(num))
-      case Expr.ZBool(v) => Expression(expr.pos, false, ExpressionKind.EBoolean(v))
-      case Expr.ZList(kind, values) => compileArray(kind, values, expr.pos)
-      case Expr.ZCompound(map) => compileCompound(expr.pos, map)
-      case Expr.ZVariable(path) => Expression(expr.pos, false, ExpressionKind.EStorage(StorageLocation.resolveResource(context.location, path)))
-      case Expr.ZScoreboardVariable(path) => Expression(expr.pos, false, ExpressionKind.EScoreboard(ScoreboardLocation.resolveResource(context.location, path)))
-      case Expr.ZMacroVariable(name) => Expression(expr.pos, true, ExpressionKind.EMacro(StorageLocation(context.location, "__" + name)))
-      case Expr.ZBuiltinCall(call) =>
-        builtins.compile(expr.pos, call)
-      case Expr.ZFunctionCall(functionCall) =>
-        val (command, called) = compileFunctionCall(expr.pos, functionCall)
+    expr match
+      case s @ Expr.Binop(_, name, l, r) => compileBinaryExpression(s)
+      case s @ Expr.Unary(_, kind, operand) => compileUnaryExpression(s)
+      case Expr.ZString(pos, contents) => Expression(pos, false, ExpressionKind.EString(contents))
+      case Expr.ZByte(pos, num) => Expression(pos, false, ExpressionKind.EByte(num))
+      case Expr.ZShort(pos, num) => Expression(pos, false, ExpressionKind.EShort(num))
+      case Expr.ZInt(pos, num) => Expression(pos, false, ExpressionKind.EInteger(num))
+      case Expr.ZLong(pos, num) => Expression(pos, false, ExpressionKind.ELong(num))
+      case Expr.ZFloat(pos, num) => Expression(pos, false, ExpressionKind.EFloat(num))
+      case Expr.ZDouble(pos, num) => Expression(pos, false, ExpressionKind.EDouble(num))
+      case Expr.ZBool(pos, v) => Expression(pos, false, ExpressionKind.EBoolean(v))
+      case Expr.ZList(pos, kind, values) => compileArray(kind, values, pos)
+      case Expr.ZCompound(pos, map) => compileCompound(pos, map)
+      case Expr.ZVariable(pos, path) => Expression(pos, false, ExpressionKind.EStorage(StorageLocation.resolveResource(context.location, path)))
+      case Expr.ZScoreboardVariable(pos, path) => Expression(pos, false, ExpressionKind.EScoreboard(ScoreboardLocation.resolveResource(context.location, path)))
+      case Expr.ZMacroVariable(pos, name) => Expression(pos, true, ExpressionKind.EMacro(StorageLocation(context.location, "__" + name)))
+      case Expr.ZBuiltinCall(pos, call) =>
+        builtins.compile(pos, call)
+      case Expr.ZFunctionCall(pos, functionCall) =>
+        val (command, called) = compileFunctionCall(pos, functionCall)
         called.returnType match
           case ReturnType.Storage =>
             val storage = StorageLocation(called.location, "return")
@@ -1817,7 +1754,7 @@ class Compiler:
             val scoreboard = nextScoreboard(context.location.namespace)
             context.code.append(mcfunc"execute store result score ${scoreboard} run ${command}")
             Expression(expr.pos, false, ExpressionKind.EScoreboard(scoreboard))
-      case Expr.Atom(expr) => compileExpression(expr, ignored)
+      case Expr.Atom(pos, expr) => compileExpression(expr, ignored)
 
   def compileModule(module: parser.ast.Decl.Module, location: ResourceLocation): Unit =
     enterScope(module.name)

@@ -10,6 +10,7 @@ import parsley.*
   parser.parseAll.parse(fileContent) match
     case Success(ast) => 
       // println(ast)
+      println("parsed")
       val compiler = new Compiler
       compiler.compile(ast, "build")
     case Failure(v) => 

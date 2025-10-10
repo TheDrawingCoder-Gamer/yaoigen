@@ -10,4 +10,5 @@ lazy val root = (project in file("."))
     libraryDependencies += "com.github.j-mie6" %% "parsley-cats" % "1.5.0",
     libraryDependencies += "io.circe" %% "circe-core" % "0.14.15",
     libraryDependencies += "io.circe" %% "circe-generic" % "0.14.15",
+    Compile / run / fork := true
   )
