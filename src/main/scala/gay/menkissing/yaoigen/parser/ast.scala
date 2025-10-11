@@ -1,8 +1,8 @@
-package gay.menkissing.ziglin.parser
+package gay.menkissing.yaoigen.parser
 
 import parsley.Parsley
 import cats.implicits.*
-import gay.menkissing.ziglin.util.{FileInfo, Location}
+import gay.menkissing.yaoigen.util.{FileInfo, Location}
 import parsley.cats.instances.*
 import parsley.syntax.zipped.*
 import parsley.generic
@@ -299,6 +299,9 @@ object ast:
 
     case class ZResource(pos: bridge.Pos, isAsset: Boolean, kind: String, content: ResourceContent) extends Decl
     object ZResource extends bridge.PosBridge3[Boolean, String, ResourceContent, Decl]
+
+    case class ZConfig(pos: bridge.Pos, data: io.circe.Json) extends Decl
+    object ZConfig extends bridge.PosBridge1[io.circe.Json, Decl]
 
     case class ZBuiltinCall(pos: bridge.Pos, call: BuiltinCall) extends Decl
     object ZBuiltinCall extends bridge.PosBridge1[BuiltinCall, Decl]

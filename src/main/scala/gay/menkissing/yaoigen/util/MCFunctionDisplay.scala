@@ -1,4 +1,4 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
 @FunctionalInterface
 trait MCFunctionDisplay[T]:

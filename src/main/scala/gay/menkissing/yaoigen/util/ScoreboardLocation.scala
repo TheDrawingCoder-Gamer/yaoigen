@@ -1,6 +1,6 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
-import gay.menkissing.ziglin.parser.ast.UnresolvedResource
+import gay.menkissing.yaoigen.parser.ast.UnresolvedResource
 
 case class ScoreboardLocation(scoreboard: ResourceLocation, name: String):
   def scoreboardString: String =
@@ -23,4 +23,4 @@ object ScoreboardLocation:
   def resolveResource(fnLoc: ResourceLocation, resource: UnresolvedResource): ScoreboardLocation =
     fromFnLoc(ResourceLocation.resolveResource(fnLoc, resource))
   def internal(namespace: String, name: String): ScoreboardLocation =
-    ScoreboardLocation(ResourceLocation("ziglin", List("internal", namespace, "vars"), ResourceKind.Func), name)
+    ScoreboardLocation(ResourceLocation("yaoigen", List("internal", namespace, "vars"), ResourceKind.Func), name)

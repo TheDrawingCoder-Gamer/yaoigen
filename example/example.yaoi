@@ -1,0 +1,10 @@
+namespace example {
+    mcmeta {
+        pack: {
+            description: "Hello",
+            pack_format: 48
+        }
+    }
+
+    include "./foo"
+}

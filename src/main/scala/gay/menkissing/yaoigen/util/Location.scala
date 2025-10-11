@@ -1,4 +1,4 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
 import parsley.Parsley
 import parsley.position.pos as ppos

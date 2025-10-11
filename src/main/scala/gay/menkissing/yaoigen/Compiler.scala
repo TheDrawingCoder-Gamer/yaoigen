@@ -1,6 +1,6 @@
-package gay.menkissing.ziglin
+package gay.menkissing.yaoigen
 
-import gay.menkissing.ziglin.parser.ast.{ArrayKind, BinopKind, CommandPart, ElseStatement, Expr, ForRange, InsertedExpr, Parameter, ParameterKind, ReturnType, Stmt, UnaryKind}
+import gay.menkissing.yaoigen.parser.ast.{ArrayKind, BinopKind, CommandPart, ElseStatement, Expr, ForRange, InsertedExpr, Parameter, ParameterKind, ReturnType, Stmt, UnaryKind}
 import util.{Location, ResourceKind, ResourceLocation, ScoreboardLocation, StorageLocation, mcdisplay, given}
 import util.MCFunctionDisplay.{mcfunc, given}
 
@@ -9,9 +9,9 @@ import scala.collection.mutable
 import scala.util.Using
 import cats.implicits.*
 import cats.*
-import gay.menkissing.ziglin.Compiler.FileTree.Item
-import gay.menkissing.ziglin.parser.ast
-import gay.menkissing.ziglin.parser.ast.Decl.ZResource
+import gay.menkissing.yaoigen.Compiler.FileTree.Item
+import gay.menkissing.yaoigen.parser.ast
+import gay.menkissing.yaoigen.parser.ast.Decl.ZResource
 import io.circe.*
 import io.circe.syntax.*
 
@@ -21,14 +21,19 @@ import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor}
 
 object Compiler:
   case class MinecraftTag(values: List[String]) derives Decoder, Encoder
-  case class MCMeta(packFormat: String, description: String)
 
-  given Decoder[MCMeta] =
-    Decoder.forProduct2("pack_format", "description")(MCMeta.apply)
-  given Encoder[MCMeta] =
+
+  case class MCMetaPack(packFormat: Int, description: String)
+
+  given Decoder[MCMetaPack] =
+    Decoder.forProduct2("pack_format", "description")(MCMetaPack.apply)
+
+  given Encoder[MCMetaPack] =
     Encoder.forProduct2("pack_format", "description")(u =>
       (u.packFormat, u.description)
     )
+
+  case class MCMeta(pack: MCMetaPack) derives Encoder, Decoder
 
 
 
@@ -737,18 +742,21 @@ object Compiler:
       s"Scope(parent = $parent, children = ${children.mkString("HashMap(",",",")")}, functionRegistry = ${functionRegistry.mkString("HashMap(",",",")")})"
   case class FileTree(namespaces: List[FileTree.Namespace]):
     import java.nio.file.{Files, Path}
-    def generate(path: String): Unit =
+    def generate(path: String, config: Json): Unit =
       val rootPath = Path.of(path)
-      Using(Files.walk(rootPath)): walk =>
-        walk.sorted(Comparator.reverseOrder())
-          .map(_.toFile)
-          .forEach(_.delete(): Unit)
-      .get
+      if Files.exists(rootPath) then
+        Using(Files.walk(rootPath)): walk =>
+          walk.sorted(Comparator.reverseOrder())
+            .map(_.toFile)
+            .forEach(_.delete(): Unit)
+        .get
 
+      
       val workingPath = rootPath.resolve("data")
       Files.createDirectories(workingPath)
+      Files.writeString(rootPath.resolve("yaoi.txt"), "")
 
-      val mcmeta = MCMeta("48", "").asJson.spaces4
+      val mcmeta = config.spaces4
 
       Files.writeString(rootPath.resolve("pack.mcmeta"), mcmeta)
 
@@ -859,6 +867,7 @@ class Compiler:
   val functionRegistry: mutable.HashMap[ResourceLocation, FunctionDefinition] = mutable.HashMap()
   val namespaces: mutable.HashMap[String, FileTree.Namespace] = mutable.HashMap()
   val counters: mutable.HashMap[String, Int] = mutable.HashMap()
+  var config: Option[Json] = None
 
   def nextCounter(name: String): Int =
     if counters.contains(name) then
@@ -869,7 +878,7 @@ class Compiler:
       0
 
   def nextFunction(funcType: String, namespace: String): ResourceLocation =
-    ResourceLocation("ziglin", List("generated", namespace, funcType, s"fn_${nextCounter(s"function:${funcType}")}"), ResourceKind.Func)
+    ResourceLocation("yaoigen", List("generated", namespace, funcType, s"fn_${nextCounter(s"function:${funcType}")}"), ResourceKind.Func)
   def pushScope(name: String, parent: Int): Int = {
     scopes.append(Compiler.Scope(parent))
     val index = scopes.length - 1
@@ -906,33 +915,39 @@ class Compiler:
 
 
   private object register:
-    private def registerNamespace(ns: parser.ast.Namespace, parentScope: Int): Unit =
+    private def registerNamespace(ns: parser.ast.Namespace, parentScope: Int): Either[CompileError, Unit] =
       val index = pushScope(ns.name, parentScope)
 
       val resource = ResourceLocation(ns.name, List(), ResourceKind.Module)
 
-      ns.items.foreach: decl =>
+      ns.items.traverseVoid: decl =>
         registerItem(decl, resource, index)
 
-    def apply(nses: List[ast.Namespace]): Unit =
+    def apply(nses: List[ast.Namespace]): Either[CompileError, Unit] =
       scopes.append(Compiler.Scope(0))
-      nses.foreach: ns =>
+      nses.traverseVoid: ns =>
         registerNamespace(ns, 0)
 
-    private def registerItem(item: parser.ast.Decl, location: ResourceLocation, parentScope: Int): Unit = {
+    private def registerItem(item: parser.ast.Decl, location: ResourceLocation, parentScope: Int): Either[CompileError, Unit] = {
       import parser.ast.Decl.*
       item match
         case Module(_, name, items) => registerModule(name, items, location, parentScope)
-        case IncludedItems(_, _, items) => items.foreach(item => registerItem(item, location, parentScope))
-        case ZFunction(_, returnType, name, params, stmts) => registerFunction(returnType, name, params, location, parentScope)
-        case ZResource(_, _, _, _) => ()
-        case ZBuiltinCall(_, _) => ()
+        case IncludedItems(_, _, items) => Right(items.foreach(item => registerItem(item, location, parentScope)))
+        case ZFunction(_, returnType, name, params, stmts) => Right(registerFunction(returnType, name, params, location, parentScope))
+        case ZResource(_, _, _, _) => Right(())
+        case ZBuiltinCall(_, _) => Right(())
+        case ZConfig(pos, data) =>
+          if Compiler.this.config.isDefined then
+            Left(CompileError(pos, "Duplicate MCMeta"))
+          else
+            Compiler.this.config = Some(data)
+            Right(())
     }
 
-    private def registerModule(name: String, items: List[parser.ast.Decl], location: ResourceLocation, parentScope: Int): Unit = {
+    private def registerModule(name: String, items: List[parser.ast.Decl], location: ResourceLocation, parentScope: Int): Either[CompileError, Unit] = {
       val index = pushScope(name, parentScope)
       val newLoc = location.copy(modules = location.modules.appended(name))
-      items.foreach: item =>
+      items.traverseVoid: item =>
         registerItem(item, newLoc, index)
     }
 
@@ -979,6 +994,7 @@ class Compiler:
       case module: parser.ast.Decl.Module => compileModule(module, location)
       case incl: IncludedItems => incl.items.traverseVoid(it => compileItem(it, location))
       case resource: ZResource => compileResource(resource, location)
+      case ZConfig(pos, data) => Right(()) 
       case ZBuiltinCall(pos, call) => builtins.compileDecl(pos, call, location)
 
   def compileResource(resource: ZResource, location: ResourceLocation): Either[CompileError, Unit] =
@@ -1204,18 +1220,18 @@ class Compiler:
   object internals:
     // TODO: do this idiomatically
     lazy val resetDirectReturn: ResourceLocation = {
-      val location = ResourceLocation.function("ziglin", List("internal", "0.1.0", "reset_return"))
+      val location = ResourceLocation.function("yaoigen", List("internal", "0.1.0", "reset_return"))
       addFunctionItem(util.Location.blank, location, List(
         // TODO: better namespace for the "applies to everything" than minecraft?
-        "scoreboard players operation $temp_return ziglin.internal.minecraft.vars = $should_return ziglin.internal.minecraft.vars",
-        "scoreboard players reset $should_return ziglin.internal.minecraft.vars",
-        "return run scoreboard players get $temp_return ziglin.internal.minecraft.vars"
+        "scoreboard players operation $temp_return yaoigen.internal.minecraft.vars = $should_return yaoigen.internal.minecraft.vars",
+        "scoreboard players reset $should_return yaoigen.internal.minecraft.vars",
+        "return run scoreboard players get $temp_return yaoigen.internal.minecraft.vars"
       )).getOrElse(throw InternalError(util.Location.blank, "We should ALWAYS be able to define reset_return once"))
       location
     }
     def continueCommands(loop: ResourceLocation): List[String] =
       List(
-        mcfunc"scoreboard players reset $$should_continue ziglin.internal.${ScoreboardLocation.scoreboardStringOf(loop)}.vars",
+        mcfunc"scoreboard players reset $$should_continue yaoigen.internal.${ScoreboardLocation.scoreboardStringOf(loop)}.vars",
         mcfunc"return run function $loop"
       )
 
@@ -1223,7 +1239,7 @@ class Compiler:
     // When a continue is compiled, it SHOULD:tm: already check the nestInfo
     val loopContext = context.nestInfo.get.currentLoopContext.get
     val scoreboardString = ScoreboardLocation.scoreboardStringOf(loopContext.location)
-    useScoreboard(s"ziglin.internal.$scoreboardString.vars")
+    useScoreboard(s"yaoigen.internal.$scoreboardString.vars")
     context.nestInfo.get.kind match
       case NestKind.Loop(loopContext2) =>
         assert(loopContext2 == loopContext)
@@ -1232,12 +1248,12 @@ class Compiler:
         val fn = nextFunction("continue", context.location.namespace)
         addFunctionItem(util.Location.blank, fn, commands).map: _ =>
           context.code.append(
-            mcfunc"execute if score $$should_continue ziglin.internal.${scoreboardString}.vars matches ${Int.MinValue}..${Int.MaxValue} run return run function ${fn}"
+            mcfunc"execute if score $$should_continue yaoigen.internal.${scoreboardString}.vars matches ${Int.MinValue}..${Int.MaxValue} run return run function ${fn}"
           )
       case _ =>
         Right:
           context.code.append(
-            s"execute if score $$should_continue ziglin.internal.${scoreboardString}.vars matches ${Int.MinValue}..${Int.MaxValue} run return 0"
+            s"execute if score $$should_continue yaoigen.internal.${scoreboardString}.vars matches ${Int.MinValue}..${Int.MaxValue} run return 0"
           )
 
   def generateNestedReturn()(using context: FuncContext): Unit =
@@ -1245,11 +1261,11 @@ class Compiler:
       context.returnType match
         case ReturnType.Storage | ReturnType.Scoreboard if context.isNested => "return 0"
         case ReturnType.Storage | ReturnType.Scoreboard =>
-          s"return run scoreboard players reset $$should_return ziglin.internal.minecraft.vars"
+          s"return run scoreboard players reset $$should_return yaoigen.internal.minecraft.vars"
         case ReturnType.Direct =>
           mcfunc"return run function ${internals.resetDirectReturn}"
     context.code.append(
-      s"execute if score $$should_return ziglin.internal.minecraft.vars matches ${Int.MinValue}..${Int.MaxValue} run $returnCommand"
+      s"execute if score $$should_return yaoigen.internal.minecraft.vars matches ${Int.MinValue}..${Int.MaxValue} run $returnCommand"
     )
 
   def cleanCommandString(str: String): String =
@@ -1609,7 +1625,7 @@ class Compiler:
       if !nestInfo.isLoop then
         context.hasNestedContinue.value = true
         context.code.append(
-          mcfunc"return run scoreboard players set $$should_continue ziglin.internal.${scoreboardString}.vars 0"
+          mcfunc"return run scoreboard players set $$should_continue yaoigen.internal.${scoreboardString}.vars 0"
         )
       else
         context.code.append(mcfunc"return run function ${curLoop.actualLocation}")
@@ -1798,7 +1814,7 @@ class Compiler:
       exitScope()
     // TODO: comptime
   def compileNamespace(ast: parser.ast.Namespace): Either[CompileError, Unit] =
-    loadFunctions.prepend(s"ziglin:generated/${ast.name}/load")
+    loadFunctions.prepend(s"yaoigen:generated/${ast.name}/load")
     enterScope(ast.name)
     // TODO: comptime
 
@@ -1814,7 +1830,7 @@ class Compiler:
 
       val loadFunction = FileTree.Item.ZFunction("load", loadCommands.toList, util.Location.blank)
 
-      addItem(ResourceLocation.module("ziglin", List("generated", ast.name)), loadFunction)
+      addItem(ResourceLocation.module("yaoigen", List("generated", ast.name)), loadFunction)
 
   def compileTree(ast: List[parser.ast.Namespace]): Either[CompileError, FileTree] =
     ast.traverseVoid: ns =>
@@ -1837,27 +1853,31 @@ class Compiler:
       .map: _ =>
         FileTree(namespaces.values.toList)
 
-  def compile(file: List[parser.ast.Namespace], output: String): Either[CompileError, Unit] =
-    register(file)
-
-    compileTree(file).map: tree =>
-      tree.generate(output)
+  def compile(file: List[parser.ast.Namespace], output: String, force: Boolean): Either[CompileError, Unit] =
+    import java.nio.file.{Files, Path}
+    val rootPath = Path.of(output)
+    if !force && Files.exists(rootPath) && !Files.exists(rootPath.resolve("yaoi.txt")) then
+      Left(CompileError(util.Location.blank, "The output directory has data in it, \nbut it's not made by yaoigen (no yaoi.txt); use --force to force"))
+    else
+      register(file).flatMap: _ =>
+        compileTree(file).map: tree =>
+          tree.generate(output, this.config.getOrElse(MCMeta(MCMetaPack(description = "", packFormat = 48)).asJson))
 
 
   def nextScoreboard(namespace: String): ScoreboardLocation =
-    useScoreboard(s"ziglin.internal.${namespace}.vars")
+    useScoreboard(s"yaoigen.internal.${namespace}.vars")
     val nextNum = nextCounter("scoreboard")
-    ScoreboardLocation(ResourceLocation("ziglin", List("internal", namespace, "vars"), ResourceKind.Func), s"$$var_${nextNum}")
+    ScoreboardLocation(ResourceLocation("yaoigen", List("internal", namespace, "vars"), ResourceKind.Func), s"$$var_${nextNum}")
 
   def nextStorage(namespace: String): StorageLocation =
     val nextNum = nextCounter("storage")
-    StorageLocation(ResourceLocation("ziglin", List("internal", namespace, "vars"), ResourceKind.Func), "var_" + nextNum)
+    StorageLocation(ResourceLocation("yaoigen", List("internal", namespace, "vars"), ResourceKind.Func), "var_" + nextNum)
 
   def constantScoreboard(number: Int): ScoreboardLocation =
-    useScoreboard("ziglin.internal.constants")
+    useScoreboard("yaoigen.internal.constants")
     constantScoreboardValues += number
     val strRep = if number < 0 then s"neg${math.abs(number)}" else number.toString
-    ScoreboardLocation(ResourceLocation("ziglin", List("internal", "constants"), ResourceKind.Func), strRep)
+    ScoreboardLocation(ResourceLocation("yaoigen", List("internal", "constants"), ResourceKind.Func), "$" + strRep)
 
 
   def copyToStorage(code: mutable.ArrayBuffer[String], value: Expression, namespace: String): Either[CompileError, StorageLocation] =

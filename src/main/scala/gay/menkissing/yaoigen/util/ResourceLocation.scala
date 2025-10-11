@@ -1,6 +1,6 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
-import gay.menkissing.ziglin.parser.ast.UnresolvedResource
+import gay.menkissing.yaoigen.parser.ast.UnresolvedResource
 
 case class ResourceLocation(
                            namespace: String,

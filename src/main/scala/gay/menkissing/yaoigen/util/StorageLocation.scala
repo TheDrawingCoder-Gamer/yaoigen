@@ -1,8 +1,8 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
-import gay.menkissing.ziglin.parser.ast.UnresolvedResource
-import gay.menkissing.ziglin.util.MCFunctionDisplay.{mcfunc, given}
-import gay.menkissing.ziglin.util.given
+import gay.menkissing.yaoigen.parser.ast.UnresolvedResource
+import gay.menkissing.yaoigen.util.MCFunctionDisplay.{mcfunc, given}
+import gay.menkissing.yaoigen.util.given
 
 object StorageLocation:
   def fromFnLoc(fnLoc: ResourceLocation): StorageLocation =

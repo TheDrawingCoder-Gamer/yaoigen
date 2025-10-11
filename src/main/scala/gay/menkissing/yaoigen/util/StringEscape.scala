@@ -1,4 +1,4 @@
-package gay.menkissing.ziglin.util
+package gay.menkissing.yaoigen.util
 
 object StringEscape:
   def escapedCodePoint(c: Int): String =

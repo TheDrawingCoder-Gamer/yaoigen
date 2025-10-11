@@ -1,9 +1,9 @@
-package gay.menkissing.ziglin
+package gay.menkissing.yaoigen
 
 import parser.*
 import parsley.cats.instances.*
 import cats.implicits.*
-import gay.menkissing.ziglin.util.FileInfo
+import gay.menkissing.yaoigen.util.FileInfo
 import parsley.token.Lexer
 import parsley.token.descriptions.*
 import text.*
@@ -203,7 +203,7 @@ class Parser(val fileInfo: FileInfo):
   }
 
   lazy val functionCall: Parsley[ast.Expr] = {
-    ast.Expr.ZFunctionCall(ast.FunctionCall(ziglinResource, lexeme.parens(lexeme.commaSep(expr))))
+    ast.Expr.ZFunctionCall(ast.FunctionCall(unresolvedResource, lexeme.parens(lexeme.commaSep(expr))))
   }
 
   lazy val primary: Parsley[ast.Expr] = {
@@ -225,7 +225,7 @@ class Parser(val fileInfo: FileInfo):
       atomic(builtinCallExpr),
       ast.Expr.ZScoreboardVariable(parsley.character.char('$') *> scoreboardResource),
       ast.Expr.ZMacroVariable(parsley.character.char('%') *> lexeme.names.identifier),
-      atomic(ast.Expr.ZVariable(ziglinResource))
+      atomic(ast.Expr.ZVariable(unresolvedResource))
     )
   }
 
@@ -261,12 +261,12 @@ class Parser(val fileInfo: FileInfo):
     <|> nonlexeme.symbol("~/").as("~")
 
 
-  lazy val ziglinResourcePath: Parsley[(List[String], String)] =
+  lazy val unresolvedResourcePath: Parsley[(List[String], String)] =
     modulePath <~> nonlexeme.names.identifier
 
-  lazy val ziglinResource: Parsley[ast.UnresolvedResource] =
+  lazy val unresolvedResource: Parsley[ast.UnresolvedResource] =
     lexeme(
-      (option(namespaceString), ziglinResourcePath).mapN { case (a, (b, c)) =>
+      (option(namespaceString), unresolvedResourcePath).mapN { case (a, (b, c)) =>
         ast.UnresolvedResource(a, b, c)
       })
 
@@ -359,7 +359,7 @@ class Parser(val fileInfo: FileInfo):
     atomicChoice(
       ast.InsertedExpr.ScoreboardVariable(parsley.character.char('$') *> scoreboardResource),
       ast.InsertedExpr.MacroVariable(parsley.character.char('%') *> lexeme.names.identifier),
-      ast.InsertedExpr.ResourceRef(ziglinResource),
+      ast.InsertedExpr.ResourceRef(unresolvedResource),
       ast.InsertedExpr.ZBuiltinCall(builtinCall)
     )
 
@@ -417,6 +417,7 @@ class Parser(val fileInfo: FileInfo):
       fnDecl,
       freakyResource,
       includedItems,
+      config,
       ast.Decl.ZBuiltinCall(builtinCall)
     )
   }
@@ -442,7 +443,8 @@ class Parser(val fileInfo: FileInfo):
   lazy val jsonResourceBody: Parsley[ast.ResourceContent] =
     (lexeme.names.identifier <~> json.jroot).map(ast.ResourceContent.Text.apply)
 
-
+  lazy val config: Parsley[ast.Decl] =
+    ast.Decl.ZConfig(lexeme.symbol("mcmeta") ~> json.jroot)
 
   lazy val module:  Parsley[ast.Decl] =
     lexeme.symbol("module") *> ast.Decl.Module(lexeme.names.identifier, lexeme.braces(Parsley.many(decl)))
@@ -455,7 +457,7 @@ class Parser(val fileInfo: FileInfo):
     }.impure
 
   def child(name: String): Parsley[ast.Decl] =
-    val actualName = if !name.endsWith(".ziglin") then name + ".ziglin" else name
+    val actualName = if !name.endsWith(".yaoi") then name + ".yaoi" else name
     val newPath = Path.of(fileInfo.file).resolveSibling(actualName).normalize()
     val newInfo = fileInfo.copy(file = newPath.toString)
     val newParser = Parser(newInfo)
