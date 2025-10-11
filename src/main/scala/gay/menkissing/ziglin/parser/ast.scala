@@ -1,6 +1,5 @@
 package gay.menkissing.ziglin.parser
 
-import parsley.position.pos
 import parsley.Parsley
 import cats.implicits.*
 import gay.menkissing.ziglin.util.{FileInfo, Location}
@@ -17,7 +16,6 @@ object ast:
   object UnresolvedResource extends generic.ParserBridge3[Option[String], List[String], String, UnresolvedResource]
 
   object bridge:
-    import parsley.lift.*
     type Pos = Location
 
     trait PosSingleton[+A]:

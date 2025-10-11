@@ -11,11 +11,9 @@ import parsley.token.predicate.Basic
 import parsley.combinator.*
 import parsley.{Failure, Parsley, Success}
 import parsley.Parsley.atomic
-import parsley.position.pos
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import scala.collection.mutable
 
 object Parser:
   val nameDesc = {

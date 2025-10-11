@@ -12,7 +12,8 @@ import parsley.*
       // println(ast)
       println("parsed")
       val compiler = new Compiler
-      compiler.compile(ast, "build")
+      compiler.compile(ast, "build").left.foreach: err =>
+        println(err.getMessage)
     case Failure(v) => 
       println(v)
 

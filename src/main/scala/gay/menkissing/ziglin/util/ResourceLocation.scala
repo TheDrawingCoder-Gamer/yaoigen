@@ -1,7 +1,6 @@
 package gay.menkissing.ziglin.util
 
 import gay.menkissing.ziglin.parser.ast.UnresolvedResource
-import scala.collection.mutable
 
 case class ResourceLocation(
                            namespace: String,
