@@ -117,11 +117,24 @@ object Compiler:
         case (ExpressionKind.EDouble(l0), ExpressionKind.EDouble(r0)) => Some(l0 == r0)
         case (ExpressionKind.EBoolean(l0), ExpressionKind.EBoolean(r0)) => Some(l0 == r0)
         case (ExpressionKind.EString(l0), ExpressionKind.EString(r0)) => Some(l0 == r0)
-        case (ExpressionKind.EArray(lValues, _), ExpressionKind.EArray(rValues, _)) => ???
-        case (ExpressionKind.EByteArray(lValues), ExpressionKind.EByteArray(rValues)) => ???
-        case (ExpressionKind.EIntArray(lValues), ExpressionKind.EIntArray(rValues)) => ???
-        case (ExpressionKind.ELongArray(lValues), ExpressionKind.ELongArray(rValues)) => ???
-        case (ExpressionKind.ECompound(lValues), ExpressionKind.ECompound(rValues)) => ???
+        case (ExpressionKind.EArray(lValues, _), ExpressionKind.EArray(rValues, _)) => compareExprArray(lValues, rValues)
+        case (ExpressionKind.EByteArray(lValues), ExpressionKind.EByteArray(rValues)) => compareExprArray(lValues, rValues)
+        case (ExpressionKind.EIntArray(lValues), ExpressionKind.EIntArray(rValues)) => compareExprArray(lValues, rValues)
+        case (ExpressionKind.ELongArray(lValues), ExpressionKind.ELongArray(rValues)) => compareExprArray(lValues, rValues)
+        case (ExpressionKind.ECompound(lValues), ExpressionKind.ECompound(rValues)) =>
+          if lValues.size != rValues.size then
+            Some(false)
+          else
+            lValues.iterator.foldLeft(Option(true)): 
+              case (Some(false), _) => Some(false)
+              case (equals, (key, a)) =>
+                rValues.get(key) match
+                  case Some(b) =>
+                    a.valueEqual(b) match
+                      case Some(true) => equals
+                      case it => it
+                  case None =>
+                    Some(false)
         case (ExpressionKind.EScoreboard(_), other) if !other.nbtType.numeric => Some(false)
         case (other, ExpressionKind.EScoreboard(_)) if !other.nbtType.numeric => Some(false)
         case (ExpressionKind.EStorage(_), _)
@@ -137,7 +150,7 @@ object Compiler:
         case Some(v) =>
           code.append(mcfunc"data modify storage ${storage} ${operation} value ${v}")
           Right(())
-        case None => {
+        case None => 
           kind match
             case ExpressionKind.EVoid => Left(CompileError(location, "Can't store void in storage"))
             case ExpressionKind.EByte(_)
@@ -148,25 +161,28 @@ object Compiler:
                  | ExpressionKind.EDouble(_)
                  | ExpressionKind.EBoolean(_)
                  | ExpressionKind.EString(_) => throw InternalError(location, "INTERNAL ERROR: This value should have a compile time string representation")
-            case ExpressionKind.EArray(values, nbtType) => ???
-            case ExpressionKind.EByteArray(values) => ???
-            case ExpressionKind.EIntArray(values) => ???
-            case ExpressionKind.ELongArray(values) => ???
-            case ExpressionKind.ECompound(values) => ???
-            case ExpressionKind.EStorage(loc) =>
-              Right((mcfunc"from storage ${loc}", StorageKind.Modify))
-            case ExpressionKind.ESubString(loc, start, end) =>
-              Right((mcfunc"string storage ${loc} ${start}${if end.nonEmpty then " " + end.get.toString else ""}", StorageKind.Modify))
-            case ExpressionKind.EScoreboard(loc) =>
-              Right((mcfunc"scoreboard players get ${loc}", StorageKind.Store))
-            case ExpressionKind.EMacro(loc) =>
-              Right((mcfunc"value $$(${loc.name})", StorageKind.MacroModify))
-            case ExpressionKind.ECondition(cond) =>
-              cond.compile(compiler, code, storage.storage.namespace, false).map:
-                case EvaluatedCondition.Check(c) =>
-                  (s"execute ${c}", StorageKind.Store)
-                case EvaluatedCondition.Known(v) =>
-                  (s"value $v", StorageKind.Modify)
+            case ExpressionKind.EArray(values, nbtType) => arrayToStorage(values, "", compiler, code, storage, nbtType)
+            case ExpressionKind.EByteArray(values) => arrayToStorage(values, "B; ", compiler, code, storage, NbtType.Byte)
+            case ExpressionKind.EIntArray(values) => arrayToStorage(values, "I; ", compiler, code, storage, NbtType.Int)
+            case ExpressionKind.ELongArray(values) => arrayToStorage(values, "L; ", compiler, code, storage, NbtType.Long)
+            case ExpressionKind.ECompound(values) => compoundToStorage(values, compiler, code, storage)
+            case _ => {
+              kind match
+                case ExpressionKind.EStorage(loc) =>
+                  Right((mcfunc"from storage ${loc}", StorageKind.Modify))
+                case ExpressionKind.ESubString(loc, start, end) =>
+                  Right((mcfunc"string storage ${loc} ${start}${if end.nonEmpty then " " + end.get.toString else ""}", StorageKind.Modify))
+                case ExpressionKind.EScoreboard(loc) =>
+                  Right((mcfunc"scoreboard players get ${loc}", StorageKind.Store))
+                case ExpressionKind.EMacro(loc) =>
+                  Right((mcfunc"value $$(${loc.name})", StorageKind.MacroModify))
+                case ExpressionKind.ECondition(cond) =>
+                  cond.compile(compiler, code, storage.storage.namespace, false).map:
+                    case EvaluatedCondition.Check(c) =>
+                      (s"execute ${c}", StorageKind.Store)
+                    case EvaluatedCondition.Known(v) =>
+                      (s"value $v", StorageKind.Modify)
+                case _ => throw InternalError(location, "unreachable")
         }.map { (conversionCode, kind2) =>
           val kind3 =
             (kind2, needsMacro) match
@@ -333,6 +349,76 @@ object Compiler:
       def unapply(kind: ExpressionKind): Option[Int] =
         kind.numericValue
 
+  private def compareExprArray(lValues: List[Expression], rValues: List[Expression]): Option[Boolean] =
+    if lValues.lengthCompare(rValues) != 0 then
+      Some(false)
+    else
+      lValues.zip(rValues).foldLeft(Option(true)): 
+        case (Some(false), _) => Some(false)
+        case (equals, (a, b)) =>
+        a.valueEqual(b) match
+          case Some(true) => equals
+          case Some(false) => Some(false)
+          case None => None
+
+
+  private def arrayToString(values: List[Expression], prefix: String): Option[String] =
+    val valueStrings = values.traverse(_.kind.toComptimeString(false))
+    valueStrings.map: it =>
+      it.mkString(s"[$prefix",",","]")
+
+  private def arrayToStorage(
+    elements: List[Expression],
+    prefix: String,
+    compiler: Compiler,
+    code: mutable.ArrayBuffer[String],
+    storage: StorageLocation,
+    dataType: NbtType
+  ): Either[CompileError, Unit] =
+    val constantElements = mutable.ArrayBuffer[String]()
+    val computedElementsCode = mutable.ArrayBuffer[String]()
+    elements.zipWithIndex.traverseVoid: (expr, i)  =>
+      expr.kind.toComptimeString(false) match
+        case Some(value) =>
+          constantElements.append(value)
+          Right(())
+        case _ =>
+          expr.toStorage(compiler, code, storage, s"insert $i", dataType)
+    .map: _ =>
+      // TODO: sus
+      code.append(mcfunc"data modify storage $storage set value [${prefix}${constantElements.mkString(", ")}]")
+      code.appendAll(computedElementsCode)
+  
+  private def compoundToStorage(
+    elements: Map[String, Expression],
+    compiler: Compiler,
+    code: mutable.ArrayBuffer[String],
+    storage: StorageLocation,
+  ): Either[CompileError, Unit] =
+    val constantElements = mutable.ArrayBuffer[String]()
+    val computedElementsCode = mutable.ArrayBuffer[String]()
+
+    elements.toList.traverseVoid: (key, value) =>
+      value.kind.toComptimeString(false) match
+        case Some(value) =>
+          constantElements.append(s"$key: $value")
+          Right(())
+        case _ =>
+          val elementLocation = storage.copy(name = s"${storage.name}.$key")
+
+          value.toStorage(
+            compiler,
+            computedElementsCode,
+            elementLocation,
+            "set",
+            NbtType.Unknown
+          )
+    .map: _ =>
+      code.append(
+        mcfunc"data modify storage $storage set value {${constantElements.mkString(", ")}}"
+      )
+      code.appendAll(computedElementsCode)
+
   enum ExpressionKind:
     case EVoid
     case EByte(b: Byte)
@@ -401,11 +487,15 @@ object Compiler:
             Some(s)
           else
             Some("\"" + util.StringEscape.escaped(s) + "\"")
-        case ExpressionKind.EArray(values, nbtType) => ???
-        case ExpressionKind.EByteArray(values) => ???
-        case ExpressionKind.EIntArray(values) => ???
-        case ExpressionKind.ELongArray(values) => ???
-        case ExpressionKind.ECompound(values) => ???
+        case ExpressionKind.EArray(values, nbtType) => arrayToString(values, "")
+        case ExpressionKind.EByteArray(values) => arrayToString(values, "B; ")
+        case ExpressionKind.EIntArray(values) => arrayToString(values, "I; ")
+        case ExpressionKind.ELongArray(values) => arrayToString(values, "L; ")
+        case ExpressionKind.ECompound(values) =>
+          values.toList.traverse: (key, value) =>
+            value.kind.toComptimeString(false).map(it => s"$key: $value")
+          .map: valueStrings =>
+            valueStrings.mkString("{", ", ", "}")
         case ExpressionKind.EStorage(loc) =>
           if topLevel then
             Some(loc.mcdisplay)
