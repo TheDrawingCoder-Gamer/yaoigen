@@ -23,6 +23,8 @@ object ast:
 
       final def <#(op: Parsley[?])(using f: FileInfo): Parsley[A] = f.pos.map(this.con) <~ op
 
+      def make(using f: FileInfo): Parsley[A] = f.pos.map(this.con)
+
     trait PosBridge0[+Z] extends PosSingleton[Z]:
       def apply(pos: Pos): Z
 
@@ -77,6 +79,9 @@ object ast:
       def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D], e: Parsley[E])(using f: FileInfo): Parsley[Z] =
         f.pos <**> (a, b, c, d, e).mapN((a, b, c, d, e) => this.apply(_, a, b, c, d, e))
 
+      def curriedPos(using f: FileInfo): Parsley[A => B => C => D => E => Z] =
+        f.pos.map(pos => a => b => c => d => e => this.apply(pos, a, b, c, d, e))
+
 
 
   sealed trait BinopKind extends generic.ParserBridge0[BinopKind]
@@ -111,6 +116,16 @@ object ast:
 
   case class FunctionCall(path: UnresolvedResource, args: List[Expr])
   object FunctionCall extends generic.ParserBridge2[UnresolvedResource, List[Expr], FunctionCall]
+
+  enum TimeType(val key: String):
+    case Ticks extends TimeType("t")
+    case Seconds extends TimeType("s")
+    case Day extends TimeType("d")
+
+  case class Delay(pos: bridge.Pos, n: Float, kind: TimeType):
+    override def toString: String =
+      s"$n${kind.key}"
+  object Delay extends bridge.PosBridge2[Float, TimeType, Delay]
 
   sealed trait Expr:
     def pos: bridge.Pos
@@ -252,17 +267,21 @@ object ast:
     case class ZIf(pos: bridge.Pos, ifStatement: IfStatement) extends Stmt
     object ZIf extends bridge.PosBridge1[IfStatement, Stmt]
 
-    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], label: Option[String]) extends Stmt
-    object ZWhile extends bridge.PosBridge4[Expr, Option[Expr], List[Stmt], Option[String], Stmt]
+    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], async: Option[Delay], label: Option[String]) extends Stmt
+    object ZWhile extends bridge.PosBridge5[Expr, Option[Expr], List[Stmt], Option[Delay], Option[String], Stmt]
 
-    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], label: Option[String]) extends Stmt
-    object ZFor extends bridge.PosBridge4[Expr, ForRange, List[Stmt], Option[String], Stmt]
+    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
+    object ZFor extends bridge.PosBridge5[Expr, ForRange, List[Stmt], Option[Delay], Option[String], Stmt]
 
     case class ZReturn(pos: bridge.Pos, expr: Option[Expr]) extends Stmt
     object ZReturn extends bridge.PosBridge1[Option[Expr], Stmt]
     
     case class ZContinue(pos: bridge.Pos, label: Option[String]) extends Stmt
     object ZContinue extends bridge.PosBridge1[Option[String], Stmt]
+
+    // TODO: this would require either an absurd number of generated functions, macros, or a signifigant change to the compiler
+    //case class ZAsyncContinue(pos: bridge.Pos, label: Option[String], delay: Delay) extends Stmt
+    //object ZAsyncContinue extends bridge.PosBridge2[Option[String], Delay, Stmt]
 
     case class ZBreak(pos: bridge.Pos, label: Option[String]) extends Stmt
     object ZBreak extends bridge.PosBridge1[Option[String], Stmt]

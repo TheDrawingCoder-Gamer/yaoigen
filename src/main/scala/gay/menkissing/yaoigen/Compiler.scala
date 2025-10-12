@@ -1229,7 +1229,7 @@ class Compiler:
       case None =>
         compileIfStatementWithoutChild(ifStatement.cond, ifStatement.block, false)
 
-  def compileLoop(pos: util.Location, self: ResourceLocation, body: List[ast.Stmt])(using context: FuncContext): Either[CompileError, Unit] =
+  def compileLoop(pos: util.Location, self: ResourceLocation, body: List[ast.Stmt], delay: Option[ast.Delay])(using context: FuncContext): Either[CompileError, Unit] =
     val continueLocation = self.join("continue")
     val loopContext = context.nestInfo.flatMap(_.currentLoopContext).getOrElse(throw InternalError(pos, "INTERNAL ERROR: When compiling a loop, there should be a loop context"))
     val first =
@@ -1253,10 +1253,14 @@ class Compiler:
       if f then
         compileBlock(body).flatMap { _ =>
           val subContext = context.nested(NestKind.Transparent, continueLocation, None)
-          loopContext.continueExpr.traverse: continueExpr =>
+          loopContext.continueExpr.traverseVoid: continueExpr =>
             compileExpression(continueExpr, true)(using subContext)
           .flatMap { _ =>
-            subContext.code.append(mcfunc"function $self")
+            delay match
+              case Some(delay) =>
+                subContext.code.append(mcfunc"schedule function $self ${delay.toString}")
+              case None =>
+                subContext.code.append(mcfunc"function $self")
             context.code.append(mcfunc"function $continueLocation")
 
             for {
@@ -1284,7 +1288,7 @@ class Compiler:
 
     loopContext.flatMap: loopContext =>
       val subContext = context.nested(NestKind.Loop(loopContext), func, forLoop.label)
-      compileLoop(pos, func, forLoop.body)(using subContext).map: _ =>
+      compileLoop(pos, func, forLoop.body, forLoop.delay)(using subContext).map: _ =>
         context.code.append(mcfunc"function $func")
 
 
@@ -1294,7 +1298,7 @@ class Compiler:
     val subContext = context.nested(NestKind.Loop(LoopContext(Some(whileLoop.cond), whileLoop.continueExpr, func)), func, whileLoop.label)
 
 
-    compileLoop(whileLoop.cond.pos, func, whileLoop.body)(using subContext).map: _ =>
+    compileLoop(whileLoop.cond.pos, func, whileLoop.body, whileLoop.async)(using subContext).map: _ =>
       context.code.append(mcfunc"function $func")
 
 
@@ -1384,23 +1388,18 @@ class Compiler:
       val location = ResourceLocation.function("yaoigen", List("internal", "0.1.0", "break"))
       addFunctionItem(util.Location.blank, location, List(
         // if break_n is at 0, we reached the loop we want to break from
-        "execute if score $break_n yaoigen.internal.minecraft.vars matches ..0 run scoreboard players reset $should_continue yaoigen.internal.minecraft.vars",
+        "execute if score $break_n yaoigen.internal.minecraft.vars matches ..0 run scoreboard players reset $should_break yaoigen.internal.minecraft.vars",
         "execute if score $break_n yaoigen.internal.minecraft.vars matches ..0 run return run return 0",
         // otherwise, decrement WITHOUT RESETTING THE VARIABLE!
         "scoreboard players remove $break_n yaoigen.internal.minecraft.vars 1"
       )).getOrElse(throw InternalError(util.Location.blank, "We should ALWAYS be able to define break once"))
       location
     }
-    def breakCommands(loop: ResourceLocation): List[String] =
-      List(
-        mcfunc"scoreboard players reset $$should_break yaoigen.internal.${ScoreboardLocation.scoreboardStringOf(loop)}.vars",
-        mcfunc"return 0"
-      )
 
   def generateNestedBreak()(using context: FuncContext): Unit =
     val loopContext = context.nestInfo.get.currentLoopContext.get
     val scoreboardString = ScoreboardLocation.scoreboardStringOf(loopContext.location)
-    useScoreboard(s"yaoigen.internal.minecraft.vars")
+    useScoreboard("yaoigen.internal.minecraft.vars")
     context.nestInfo.get.kind match
       case NestKind.Loop(loopContext2) =>
         val label = context.nestInfo.get.label

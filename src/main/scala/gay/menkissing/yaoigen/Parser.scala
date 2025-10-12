@@ -382,8 +382,9 @@ class Parser(val fileInfo: FileInfo):
   lazy val labelReference: Parsley[String] =
     nonlexeme.symbol(":") ~> lexeme.names.identifier
 
-  lazy val whileStmt: Parsley[Option[String] => ast.Stmt] = {
-     ast.Stmt.ZWhile(whileKeyword ~> expr, option(barSymbol ~> expr <~ barSymbol), block)
+  lazy val whileStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] = {
+    ast.Stmt.ZWhile.curriedPos <*> (whileKeyword ~> expr) <*> option(barSymbol ~> expr <~ barSymbol) <*> block
+    
   }
 
   lazy val forRange: Parsley[ast.ForRange] =
@@ -392,12 +393,34 @@ class Parser(val fileInfo: FileInfo):
 
 
   lazy val labeledDefinition: Parsley[ast.Stmt] =
-    option(atomic(labelDefinition)) <**> (whileStmt <|> forStmt)
+    option(atomic(labelDefinition)) <**> loop
+    
+  lazy val delay: Parsley[ast.Delay] =
+    lexeme(
+      ast.Delay(
+        nonlexeme.unsignedCombined.number32Float[Int].map:
+          case Left(v) => v.toFloat
+          case Right(r) => r,
+        choice(
+          lexeme.symbol("d") #> ast.TimeType.Day,
+          lexeme.symbol("s") #> ast.TimeType.Seconds,
+          lexeme.symbol("t") #> ast.TimeType.Ticks,
+          Parsley.pure(ast.TimeType.Ticks)
+        )
+      )
+    )
     
 
+  lazy val loop: Parsley[Option[String] => ast.Stmt] =
+    option(atomic(lexeme.symbol("spawn") ~> lexeme.parens(delay))) <**> 
+      choice(
+        forStmt,
+        whileStmt
+      )
 
-  lazy val forStmt: Parsley[Option[String] => ast.Stmt] =
-    ast.Stmt.ZFor(lexeme.symbol("for") ~> expr, lexeme.symbol("in") ~> forRange, block)
+
+  lazy val forStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] =
+    ast.Stmt.ZFor.curriedPos <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {
     ast.IfStatement(lexeme.symbol("if") ~> expr, block, option(elseStmt))
