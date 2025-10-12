@@ -322,21 +322,20 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val stmt: Parsley[ast.Stmt] = {
       (quotedCommand <~ optional(lexeme.symbol.semi))
-      <|>  whileStmt
-      <|> forStmt
+      <|> labeledDefinition
       <|> continueStmt
       <|> breakStmt
       <|> ast.Stmt.ZIf(ifStmt)
       <|> (returnStmt <~ optional(lexeme.symbol.semi))
-      <|> atomic(unquotedCommand)
+      <|> unquotedCommand
       <|> (evalExpr <~ optional(lexeme.symbol.semi))
   }
   
   lazy val continueStmt: Parsley[ast.Stmt] =
-    (ast.Stmt.ZContinue <# lexeme.symbol("continue")) <~ optional(lexeme.symbol.semi)
+    ast.Stmt.ZContinue(lexeme.symbol("continue") ~> option(labelReference)) <~ optional(lexeme.symbol.semi)
   
   lazy val breakStmt: Parsley[ast.Stmt] =
-    (ast.Stmt.ZBreak <# lexeme.symbol("break")) <~ optional(lexeme.symbol.semi)
+    ast.Stmt.ZBreak(lexeme.symbol("break") ~> option(labelReference)) <~ optional(lexeme.symbol.semi)
 
   def commandPartShared(invalidCharacters: String): Parsley[ast.CommandPart] =
     atomicChoice(
@@ -367,7 +366,7 @@ class Parser(val fileInfo: FileInfo):
     lexeme(ast.Stmt.Command(parsley.character.char('`') ~> Parsley.many(quotedCommandPart) <~ parsley.character.char('`')))
 
   lazy val unquotedCommand =
-    lexeme(ast.Stmt.Command((parsley.character.strings(Parser.commands.head, Parser.commands.tail:_*), parsley.character.stringOfSome(parsley.character.whitespace), Parsley.many(unquotedCommandPart)).mapN { (start, space, rest) =>
+    lexeme(ast.Stmt.Command((atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail:_*)), parsley.character.stringOfSome(parsley.character.whitespace), Parsley.many(unquotedCommandPart)).mapN { (start, space, rest) =>
       rest.prepended(ast.CommandPart.Literal(start + space))
     }))
 
@@ -377,7 +376,13 @@ class Parser(val fileInfo: FileInfo):
 
   val barSymbol = lexeme.symbol("|")
 
-  lazy val whileStmt: Parsley[ast.Stmt] = {
+  lazy val labelDefinition: Parsley[String] =
+    nonlexeme.names.identifier <~ lexeme.symbol.colon
+
+  lazy val labelReference: Parsley[String] =
+    nonlexeme.symbol(":") ~> lexeme.names.identifier
+
+  lazy val whileStmt: Parsley[Option[String] => ast.Stmt] = {
      ast.Stmt.ZWhile(whileKeyword ~> expr, option(barSymbol ~> expr <~ barSymbol), block)
   }
 
@@ -385,7 +390,13 @@ class Parser(val fileInfo: FileInfo):
     atomic(ast.ForRange.Range(expr, (lexeme.symbol("until") #> false) <|> (lexeme.symbol("to") #> true), expr))
     <|> ast.ForRange.Single(expr)
 
-  lazy val forStmt: Parsley[ast.Stmt] =
+
+  lazy val labeledDefinition: Parsley[ast.Stmt] =
+    option(atomic(labelDefinition)) <**> (whileStmt <|> forStmt)
+    
+
+
+  lazy val forStmt: Parsley[Option[String] => ast.Stmt] =
     ast.Stmt.ZFor(lexeme.symbol("for") ~> expr, lexeme.symbol("in") ~> forRange, block)
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {

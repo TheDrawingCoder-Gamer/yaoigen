@@ -5,13 +5,17 @@ module foo {
         while $a < 10 |$a += 1| {
         }
 
-        for $i in 1 to $a {
-            say pee
-            if $i == 5 {
-                continue
-            }
-            if $i == 6 {
-                break
+        for $k in 1 to 10 {
+            label: for $i in 1 to 10 {
+                for $j in 1 to 10 {
+                    say pee
+                    if $j == 9 {
+                        continue :label
+                    }
+                    if $i == 5 and $j == 5 {
+                        break :label
+                    }
+                }
             }
         }
     }

@@ -7,4 +7,12 @@ namespace example {
     }
 
     include "./foo"
+
+    fn load() {
+        say laoded
+    }
+
+    fn tick() {
+        
+    }
 }

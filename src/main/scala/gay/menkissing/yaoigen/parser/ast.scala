@@ -66,6 +66,9 @@ object ast:
       def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C], d: Parsley[D])(using f: FileInfo): Parsley[Z] =
         f.pos <**> (a, b, c, d).mapN((a, b, c, d) => this.apply(_, a, b, c, d))
 
+      def apply(a: Parsley[A], b: Parsley[B], c: Parsley[C])(using f: FileInfo): Parsley[D => Z] =
+        f.pos <**> (a, b, c).mapN((a, b, c) => pos => d => this.apply(pos, a, b, c, d))
+
     trait PosBridge5[-A, -B, -C, -D, -E, +Z] extends PosSingleton[(A, B, C, D, E) => Z]:
       override final def con(pos: Pos): (A, B, C, D, E) => Z = this.apply(pos, _, _, _, _, _)
 
@@ -249,20 +252,20 @@ object ast:
     case class ZIf(pos: bridge.Pos, ifStatement: IfStatement) extends Stmt
     object ZIf extends bridge.PosBridge1[IfStatement, Stmt]
 
-    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt]) extends Stmt
-    object ZWhile extends bridge.PosBridge3[Expr, Option[Expr], List[Stmt], Stmt]
+    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], label: Option[String]) extends Stmt
+    object ZWhile extends bridge.PosBridge4[Expr, Option[Expr], List[Stmt], Option[String], Stmt]
 
-    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt]) extends Stmt
-    object ZFor extends bridge.PosBridge3[Expr, ForRange, List[Stmt], Stmt]
+    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], label: Option[String]) extends Stmt
+    object ZFor extends bridge.PosBridge4[Expr, ForRange, List[Stmt], Option[String], Stmt]
 
     case class ZReturn(pos: bridge.Pos, expr: Option[Expr]) extends Stmt
     object ZReturn extends bridge.PosBridge1[Option[Expr], Stmt]
     
-    case class ZContinue(pos: bridge.Pos) extends Stmt
-    object ZContinue extends bridge.PosBridge0[Stmt]
+    case class ZContinue(pos: bridge.Pos, label: Option[String]) extends Stmt
+    object ZContinue extends bridge.PosBridge1[Option[String], Stmt]
 
-    case class ZBreak(pos: bridge.Pos) extends Stmt
-    object ZBreak extends bridge.PosBridge0[Stmt]
+    case class ZBreak(pos: bridge.Pos, label: Option[String]) extends Stmt
+    object ZBreak extends bridge.PosBridge1[Option[String], Stmt]
 
 
   enum ReturnType:
