@@ -701,6 +701,7 @@ object Compiler:
                     var returnType: ReturnType,
                     var hasNestedReturns: util.Box[Boolean] = util.Box(false),
                     var hasNestedContinue: util.Box[Boolean] = util.Box(false),
+                    var hasNestedBreak: util.Box[Boolean] = util.Box(false),
                     val code: mutable.ArrayBuffer[String] = mutable.ArrayBuffer(),
                     val isNested: Boolean = false,
                     var hasMacroArgs: Boolean = false,
@@ -712,6 +713,7 @@ object Compiler:
       FuncContext(location, returnType,
         hasNestedReturns = this.hasNestedReturns,
         hasNestedContinue = this.hasNestedContinue,
+        hasNestedBreak = this.hasNestedBreak,
         isNested = isNested,
         hasMacroArgs = hasMacroArgs,
         code = code,
@@ -721,6 +723,7 @@ object Compiler:
       FuncContext(location, returnType,
         hasNestedReturns = this.hasNestedReturns,
         hasNestedContinue = this.hasNestedContinue,
+        hasNestedBreak = this.hasNestedBreak,
         isNested = true,
         hasMacroArgs = hasMacroArgs,
         nestInfo = Some(NestedInfo(kind, nestInfo, actualLocation, label)))
@@ -1182,15 +1185,26 @@ class Compiler:
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
+        subContext.hasNestedBreak = util.Box(false)
         compileIfStatement(ifStatement)(using subContext).flatMap { _ =>
           if subContext.hasNestedReturns.value then
             context.hasNestedReturns.value = true
             generateNestedReturn()
-          if subContext.hasNestedContinue.value then
-            context.hasNestedContinue.value = true
-            generateNestedContinue()
-          else
-            Right(())
+          for {
+            _ <-
+              if subContext.hasNestedContinue.value then
+                context.hasNestedContinue.value = true
+                generateNestedContinue()
+              else
+                Right(())
+            _ <-
+              if subContext.hasNestedBreak.value then
+                context.hasNestedBreak.value = true
+                generateNestedBreak()
+              else
+                Right(())
+          } yield ()
+          
         }
 
 
@@ -1198,6 +1212,7 @@ class Compiler:
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
+        subContext.hasNestedBreak = util.Box(false)
         compileWhileLoop(s)(using subContext).map: _ =>
           if subContext.hasNestedReturns.value then
             context.hasNestedReturns.value = true
@@ -1208,6 +1223,7 @@ class Compiler:
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
+        subContext.hasNestedBreak = util.Box(false)
         compileForLoop(statement.pos, s)(using subContext).map: _ =>
           if subContext.hasNestedReturns.value then
             context.hasNestedReturns.value = true
@@ -1215,7 +1231,8 @@ class Compiler:
       case Stmt.ZReturn(pos, expr) => compileReturn(pos, expr)
       case Stmt.ZContinue(pos) =>
         compileContinue(pos)
-      case Stmt.ZBreak(_) => ???
+      case Stmt.ZBreak(pos) =>
+        compileBreak(pos)
 
   object internals:
     // TODO: do this idiomatically
@@ -1234,6 +1251,31 @@ class Compiler:
         mcfunc"scoreboard players reset $$should_continue yaoigen.internal.${ScoreboardLocation.scoreboardStringOf(loop)}.vars",
         mcfunc"return run function $loop"
       )
+    def breakCommands(loop: ResourceLocation): List[String] =
+      List(
+        mcfunc"scoreboard players reset $$should_break yaoigen.internal.${ScoreboardLocation.scoreboardStringOf(loop)}.vars",
+        mcfunc"return 0"
+      )
+
+  def generateNestedBreak()(using context: FuncContext): Either[CompileError, Unit] =
+    val loopContext = context.nestInfo.get.currentLoopContext.get
+    val scoreboardString = ScoreboardLocation.scoreboardStringOf(loopContext.location)
+    useScoreboard(s"yaoigen.internal.$scoreboardString.vars")
+    context.nestInfo.get.kind match
+      case NestKind.Loop(loopContext2) =>
+        assert(loopContext2 == loopContext)
+        context.hasNestedBreak.value = false
+        val commands = internals.breakCommands(loopContext.location)
+        val fn = nextFunction("break", context.location.namespace)
+        addFunctionItem(util.Location.blank, fn, commands).map: _ =>
+          context.code.append(
+            mcfunc"execute if score $$should_break yaoigen.internal.$scoreboardString.vars matches ${Int.MinValue}..${Int.MaxValue} run return run function ${fn}"
+          )
+      case _ =>
+        Right:
+          context.code.append(
+            s"execute if score $$should_break yaoigen.internal.${scoreboardString}.vars matches ${Int.MinValue}..${Int.MaxValue} run return 0"
+          )
 
   def generateNestedContinue()(using context: FuncContext): Either[CompileError, Unit] =
     // When a continue is compiled, it SHOULD:tm: already check the nestInfo
@@ -1629,6 +1671,20 @@ class Compiler:
         )
       else
         context.code.append(mcfunc"return run function ${curLoop.actualLocation}")
+    }
+
+  def compileBreak(pos: util.Location)(using context: FuncContext): Either[CompileError, Unit] =
+    context.nestInfo.flatMap { nestInfo =>
+      nestInfo.getLoop.map(it => (nestInfo, it))
+    }.toRight(CompileError(pos, "break may only be inside of loops")).map { (nestInfo, curLoop) => 
+      val scoreboardString = ScoreboardLocation.scoreboardStringOf(curLoop.actualLocation)
+      if !nestInfo.isLoop then
+        context.hasNestedBreak.value = true
+        context.code.append(
+          mcfunc"return run scoreboard players set $$should_break yaoigen.internal.${scoreboardString}.vars 0"
+        )
+      else
+        context.code.append(mcfunc"return 0")
     }
 
 

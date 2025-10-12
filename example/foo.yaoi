@@ -10,6 +10,9 @@ module foo {
             if $i == 5 {
                 continue
             }
+            if $i == 6 {
+                break
+            }
         }
     }
 
