@@ -1210,7 +1210,8 @@ class Compiler:
               case Some(ElseStatement.EIfStatement(eif)) =>
                 ifStmt = eif
               case Some(ElseStatement.Block(block)) =>
-                return compileBlock(block)(using subContext)
+                compileBlock(block)(using subContext)
+                return
               case None => return
         }
         whileMethod()
@@ -1401,10 +1402,9 @@ class Compiler:
   def generateNestedContinue()(using context: FuncContext): Unit throws CompileError =
     // When a continue is compiled, it SHOULD:tm: already check the nestInfo
     if context.nestInfo.isDefined then
-      val loopContext = context.nestInfo.get.currentLoopContext.get
       useScoreboard(s"yaoigen.internal.minecraft.vars")
       context.nestInfo.get.kind match
-        case NestKind.Loop(_) =>
+        case NestKind.Loop(loopContext) =>
           val label = context.nestInfo.get.label
           label.foreach: label =>
             context.currentContinueLabels -= label
@@ -1435,7 +1435,7 @@ class Compiler:
       context.returnType match
         case ReturnType.Storage | ReturnType.Scoreboard if context.isNested => "return 0"
         case ReturnType.Storage | ReturnType.Scoreboard =>
-          s"return run scoreboard players reset $$should_return yaoigen.internal.minecraft.vars"
+          "return run scoreboard players reset $should_return yaoigen.internal.minecraft.vars"
         case ReturnType.Direct =>
           mcfunc"return run function ${internals.resetDirectReturn}"
     context.code.append(
