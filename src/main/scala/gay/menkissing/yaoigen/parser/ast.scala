@@ -267,7 +267,7 @@ object ast:
     case class ZIf(pos: bridge.Pos, ifStatement: IfStatement) extends Stmt
     object ZIf extends bridge.PosBridge1[IfStatement, Stmt]
 
-    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], async: Option[Delay], label: Option[String]) extends Stmt
+    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
     object ZWhile extends bridge.PosBridge5[Expr, Option[Expr], List[Stmt], Option[Delay], Option[String], Stmt]
 
     case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt

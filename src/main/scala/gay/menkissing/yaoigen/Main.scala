@@ -3,6 +3,7 @@ package gay.menkissing.yaoigen
 import java.nio.charset.StandardCharsets
 import parsley.*
 
+import language.experimental.saferExceptions
 
 object Main:
   def main(args: Array[String]): Unit =
@@ -48,8 +49,11 @@ object Main:
         // println(ast)
         println("parsed")
         val compiler = new Compiler
-        compiler.compile(ast, output, force).left.foreach: err =>
-          println(err.getMessage)
+        try
+          compiler.compile(ast, output, force)
+        catch
+          case x: Compiler.CompileError =>
+            println(x.getMessage)
       case Failure(v) => 
         println(v)
 

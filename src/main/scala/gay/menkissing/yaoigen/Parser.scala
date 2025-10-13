@@ -366,7 +366,7 @@ class Parser(val fileInfo: FileInfo):
     lexeme(ast.Stmt.Command(parsley.character.char('`') ~> Parsley.many(quotedCommandPart) <~ parsley.character.char('`')))
 
   lazy val unquotedCommand =
-    lexeme(ast.Stmt.Command((atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail:_*)), parsley.character.stringOfSome(parsley.character.whitespace), Parsley.many(unquotedCommandPart)).mapN { (start, space, rest) =>
+    lexeme(ast.Stmt.Command((atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail*)), parsley.character.stringOfSome(parsley.character.whitespace), Parsley.many(unquotedCommandPart)).mapN { (start, space, rest) =>
       rest.prepended(ast.CommandPart.Literal(start + space))
     }))
 
@@ -498,7 +498,7 @@ class Parser(val fileInfo: FileInfo):
     val fileData = java.nio.file.Files.readString(newPath, StandardCharsets.UTF_8)
     lexer.fully(Parsley.many(newParser.decl)).parse(fileData) match
       case Success(x) => fileInfo.pos.map(p => ast.Decl.IncludedItems(p, name, x))
-      case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file $newPath:", failure.msg.toString)
+      case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file ${newPath.toString}:", failure.msg.toString)
 
   lazy val fnPrefixType: Parsley[ast.ReturnType] =
     choice(

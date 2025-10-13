@@ -2,12 +2,16 @@ package gay.menkissing.yaoigen.util
 
 import parsley.Parsley
 import parsley.position.pos as ppos
+import cats.*
 
 import java.nio.file.Path
 
 case class Location(line: Int, column: Int, file: String, root: String):
   def pretty: String =
-    s"in ${Path.of(root, file).toString} at line ${line}, column ${column}"
+    s"${Path.of(root, file).toString}:${line}:${column}"
+
+given Show[Location] = _.pretty
+
 object Location:
   def blank: Location =
     Location(0, 0, "", "")

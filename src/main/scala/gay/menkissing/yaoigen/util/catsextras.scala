@@ -1,7 +1,7 @@
 package gay.menkissing.yaoigen.util
 
 import cats.*
-import cats.implicits.{*, given}
+import cats.implicits.*
 
 object catsextras {
   extension[F[_], A] (self: F[A])(using app: Applicative[F]) {
