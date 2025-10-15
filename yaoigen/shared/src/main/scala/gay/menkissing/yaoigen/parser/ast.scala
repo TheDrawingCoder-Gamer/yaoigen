@@ -109,6 +109,8 @@ object ast:
   object UnaryKind:
     case object Not extends UnaryKind
     case object Negate extends UnaryKind
+    case object Tilde extends UnaryKind
+    case object Caret extends UnaryKind
 
 
   enum ArrayKind:
@@ -129,12 +131,15 @@ object ast:
 
   sealed trait Expr:
     def pos: bridge.Pos
+    val executorSensitive = false
   object Expr:
 
-    case class Binop(pos: bridge.Pos, name: BinopKind, l: Expr, r: Expr) extends Expr
+    case class Binop(pos: bridge.Pos, name: BinopKind, l: Expr, r: Expr) extends Expr:
+      override val executorSensitive: Boolean = l.executorSensitive || r.executorSensitive
     object Binop extends bridge.PosBridge3[BinopKind, Expr, Expr, Expr]
 
-    case class Unary(pos: bridge.Pos, kind: UnaryKind, expr: Expr) extends Expr
+    case class Unary(pos: bridge.Pos, kind: UnaryKind, expr: Expr) extends Expr:
+      override val executorSensitive: Boolean = expr.executorSensitive
     object Unary extends bridge.PosBridge2[UnaryKind, Expr, Expr]
 
     case class ZString(pos: bridge.Pos, contents: String) extends Expr
@@ -161,25 +166,31 @@ object ast:
     case class ZBool(pos: bridge.Pos, num: Boolean) extends Expr
     object ZBool extends bridge.PosBridge1[Boolean, Expr]
 
-    case class ZList(pos: bridge.Pos, kind: ArrayKind, values: List[Expr]) extends Expr
+    case class ZList(pos: bridge.Pos, kind: ArrayKind, values: List[Expr]) extends Expr:
+      override val executorSensitive: Boolean = values.exists(_.executorSensitive)
     object ZList extends bridge.PosBridge2[ArrayKind, List[Expr], Expr]
 
-    case class ZCompound(pos: bridge.Pos, map: Map[String, Expr]) extends Expr
+    case class ZCompound(pos: bridge.Pos, map: Map[String, Expr]) extends Expr:
+      override val executorSensitive: Boolean = map.values.exists(_.executorSensitive)
     object ZCompound extends bridge.PosBridge1[Map[String, Expr], Expr]
 
-    case class ZVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr
+    case class ZVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr:
+      override val executorSensitive: Boolean = true
     object ZVariable extends bridge.PosBridge1[UnresolvedResource, Expr]
 
-    case class ZScoreboardVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr
+    case class ZScoreboardVariable(pos: bridge.Pos, path: UnresolvedResource) extends Expr:
+      override val executorSensitive: Boolean = true
     object ZScoreboardVariable extends bridge.PosBridge1[UnresolvedResource, Expr]
 
     case class ZMacroVariable(pos: bridge.Pos, name: String) extends Expr
     object ZMacroVariable extends bridge.PosBridge1[String, Expr]
 
-    case class ZFunctionCall(pos: bridge.Pos, functionCall: FunctionCall) extends Expr
+    case class ZFunctionCall(pos: bridge.Pos, functionCall: FunctionCall) extends Expr:
+      override val executorSensitive: Boolean = true
     object ZFunctionCall extends bridge.PosBridge1[FunctionCall, Expr]
 
-    case class Atom(pos: bridge.Pos, expr: Expr) extends Expr
+    case class Atom(pos: bridge.Pos, expr: Expr) extends Expr:
+      override val executorSensitive: Boolean = expr.executorSensitive
     object Atom extends bridge.PosBridge1[Expr, Expr]
 
     case class ZBuiltinCall(pos: bridge.Pos, call: BuiltinCall) extends Expr
@@ -207,8 +218,16 @@ object ast:
 
 
 
-  case class BuiltinCall(name: String, args: List[Expr])
-  object BuiltinCall extends generic.ParserBridge2[String, List[Expr], BuiltinCall]
+  enum BuiltinArg:
+    case BExpr(pos: bridge.Pos, expr: Expr)
+    case BBlock(pos: bridge.Pos, block: List[Stmt])
+
+  object BuiltinArg:
+    object BExpr extends bridge.PosBridge1[Expr, BuiltinArg]
+    object BBlock extends bridge.PosBridge1[List[Stmt], BuiltinArg]
+
+  case class BuiltinCall(name: String, args: List[BuiltinArg])
+  object BuiltinCall extends generic.ParserBridge2[String, List[BuiltinArg], BuiltinCall]
 
   sealed trait CommandPart
 
@@ -227,8 +246,8 @@ object ast:
     case class ScoreboardVariable(pos: bridge.Pos, path: UnresolvedResource) extends InsertedExpr
     object ScoreboardVariable extends bridge.PosBridge1[UnresolvedResource, InsertedExpr]
 
-    //case class ZFunctionCall(functionCall: FunctionCall) extends InsertedExprNode
-    //object ZFunctionCall extends bridge.NestedBridge1[FunctionCall, InsertedExprNode, InsertedExpr], bridge.InsertedExprWrap
+    case class ZFunctionCall(pos: bridge.Pos, functionCall: FunctionCall, pollute: Boolean) extends InsertedExpr
+    object ZFunctionCall extends bridge.PosBridge2[FunctionCall, Boolean, ZFunctionCall]
 
     case class ResourceRef(pos: bridge.Pos, resource: UnresolvedResource) extends InsertedExpr
     object ResourceRef extends bridge.PosBridge1[UnresolvedResource, InsertedExpr]
@@ -255,6 +274,49 @@ object ast:
     case class Block(stmts: List[Stmt]) extends ElseStatement
     object Block extends generic.ParserBridge1[List[Stmt], ElseStatement]
 
+  enum PositionMode:
+    case Absolute, Relative, Caret
+
+    def prefix: String =
+      this match
+        case PositionMode.Absolute => ""
+        case PositionMode.Relative => "~"
+        case PositionMode.Caret => "^"
+ 
+  case class CommandCoord(pos: Double, mode: PositionMode)
+
+  case class CommandXYZ(x: CommandCoord, y: CommandCoord, z: CommandCoord)
+  case class CommandYawPitch(yaw: CommandCoord, pitch: CommandCoord)
+
+  sealed trait ExecutePart:
+    def pos: bridge.Pos
+  object ExecutePart:
+    case class EAlign(pos: bridge.Pos, axes: String) extends ExecutePart
+    case class EAnchored(pos: bridge.Pos, isEyes: Boolean) extends ExecutePart
+    case class EAs(pos: bridge.Pos, selector: String) extends ExecutePart
+    case class EAt(pos: bridge.Pos, selector: String) extends ExecutePart
+    sealed trait EFacing extends ExecutePart
+    object EFacing:
+      case class EPosition(pos: bridge.Pos, coord: CommandXYZ) extends EFacing
+      case class EEntity(pos: bridge.Pos, selector: String, isEyes: Boolean) extends EFacing
+    
+    case class EIn(pos: bridge.Pos, dimension: String) extends ExecutePart
+    case class EOn(pos: bridge.Pos, relation: String) extends ExecutePart
+    sealed trait EPositioned extends ExecutePart
+    object EPositioned:
+      case class EPosition(pos: bridge.Pos, coord: CommandXYZ) extends EPositioned
+      case class EAs(pos: bridge.Pos, selector: String) extends EPositioned
+      case class EOver(pos: bridge.Pos, heightmap: String) extends EPositioned
+    sealed trait ERotated extends ExecutePart
+    object ERotated:
+      case class ERotation(pos: bridge.Pos, coord: CommandYawPitch) extends ERotated
+      case class EAs(pos: bridge.Pos, selector: String) extends ERotated
+    
+    
+    case class EIf(pos: bridge.Pos, condition: Expr) extends ExecutePart
+
+
+
   sealed trait Stmt:
     def pos: bridge.Pos
   object Stmt:
@@ -272,6 +334,17 @@ object ast:
 
     case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
     object ZFor extends bridge.PosBridge5[Expr, ForRange, List[Stmt], Option[Delay], Option[String], Stmt]
+
+    case class ZForAs(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
+    object ZForAs extends bridge.PosBridge2[String, List[Stmt], Stmt]
+
+    case class ZForAt(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
+    object ZForAt extends bridge.PosBridge2[String, List[Stmt], Stmt]
+
+    //case class ZExecuteFor(pos: bridge.Pos, s)
+
+    case class ZSpawnCall(pos: bridge.Pos, call: FunctionCall, delay: Delay) extends Stmt
+    object ZSpawnCall extends bridge.PosBridge2[FunctionCall, Delay, Stmt]
 
     case class ZReturn(pos: bridge.Pos, expr: Option[Expr]) extends Stmt
     object ZReturn extends bridge.PosBridge1[Option[Expr], Stmt]

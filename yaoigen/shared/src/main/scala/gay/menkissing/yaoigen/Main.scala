@@ -49,11 +49,11 @@ object Main:
         // println(ast)
         println("parsed")
         val compiler = new Compiler
-        try
-          compiler.compile(ast, output, force)
-        catch
-          case x: Compiler.CompileError =>
-            println(x.getMessage)
+        compiler.compile(ast, output, force) match
+          case Left(err) =>
+            println(err.showPretty)
+          case _ => ()
+
       case Failure(v) => 
         println(v)
 

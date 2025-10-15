@@ -19,7 +19,9 @@ import io.circe.*
 import io.circe.syntax.*
 
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor}
+import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor, Files}
+import gay.menkissing.yaoigen.util.MCFunctionDisplay
+import gay.menkissing.yaoigen.parser.ast.BuiltinArg
 
 
 
@@ -46,11 +48,56 @@ object Compiler:
     override def getMessage: String =
       show"Internal error ${location}:\n${msg}"
 
-  case class CompileError(location: util.Location, msg: String) extends Exception:
+  sealed abstract class CompileError extends Exception:
+    val location: util.Location
+    val msg: Seq[String]
+
     override def getMessage: String =
-      show"Compile error ${location}:\n${msg}"
+      show"${location}:\n${msg.mkString("\n")}"
+    import parsley.errors.ErrorBuilder
+    def showPretty(using builder: ErrorBuilder[String]): String =
+      
+      import scala.jdk.CollectionConverters.*
+      val badFile = Path.of(location.file)
+      try
+        val lines = Files.readAllLines(badFile).asScala.toList
+        val lineInfo = builder.lineInfo(lines(location.line - 1), Seq(), Seq(), location.column, 1)
+
+        val rawMessages = msg.map(builder.message)
+        val messages = builder.combineMessages(rawMessages)
+        
+        val errLines = builder.specialisedError(messages, lineInfo)
+        
+        val pos = builder.pos(location.line, location.column)
+        val source = builder.source(Some(badFile.toString))
+
+        builder.format(pos, source, errLines)
+      catch
+        case _ => this.getMessage
+
+  case class NonfatalCompileError(location: util.Location, msg: Seq[String]) extends CompileError
+  case class FatalCompileError(location: util.Location, msg: Seq[String]) extends CompileError
+
+  object CompileError:
+    // if thrown, non fatal just means back out of the function - other functions should be able to be compiled correctly so we can get more errors
+    def nonfatal(location: util.Location, msg: String): CompileError =
+      NonfatalCompileError(location, msg.linesIterator.toSeq)
+    def nonfatal(location: util.Location, msg: Seq[String]): CompileError =
+      NonfatalCompileError(location, msg)
+    def fatal(location: util.Location, msg: String): CompileError =
+      FatalCompileError(location, msg.linesIterator.toSeq)
+    def fatal(location: util.Location, msg: Seq[String]): CompileError =
+      FatalCompileError(location, msg)
 
   case class CalledFunction(location: ResourceLocation, returnType: ReturnType)
+
+  enum FunctionCommand:
+    case PlainCall(location: ResourceLocation)
+    case MacroCall(location: ResourceLocation, storage: ResourceLocation)
+
+  given MCFunctionDisplay[FunctionCommand] =
+    case FunctionCommand.PlainCall(location) => mcfunc"function $location"
+    case FunctionCommand.MacroCall(location, storage) => mcfunc"function $location with storage $storage"
 
   enum NestKind:
     case Loop(loopContext: LoopContext)
@@ -93,7 +140,7 @@ object Compiler:
         case _ =>
           parent match
             case None =>
-              throw CompileError(util.Location.blank, s"No such label $label in scope")
+              throw CompileError.nonfatal(util.Location.blank, s"No such label $label in scope")
             case Some(p) =>
               val (it, n) = p.loopsUntilLabel(label)
               if this.isLoop then
@@ -157,7 +204,7 @@ object Compiler:
         case None => 
           val (conversionCode, kind2) =
             kind match
-              case ExpressionKind.EVoid => throw CompileError(location, "Can't store void in storage")
+              case ExpressionKind.EVoid => throw CompileError.nonfatal(location, "Can't store void in storage")
               case ExpressionKind.EByte(_)
                   | ExpressionKind.EShort(_)
                   | ExpressionKind.EInteger(_)
@@ -224,7 +271,7 @@ object Compiler:
 
     def toReturnCommand(compiler: Compiler, code: mutable.ArrayBuffer[String], namespace: String): String throws CompileError =
       this.kind match
-        case ExpressionKind.EVoid => throw CompileError(location, "Cannot return void")
+        case ExpressionKind.EVoid => throw CompileError.nonfatal(location, "Cannot return void")
         case ExpressionKind.Numeric(n) => s"return $n"
         case ExpressionKind.EBoolean(b) =>
           if b then "return 1" else "return 0"
@@ -234,7 +281,7 @@ object Compiler:
             | ExpressionKind.EByteArray(_)
             | ExpressionKind.EIntArray(_)
             | ExpressionKind.ELongArray(_)
-            | ExpressionKind.ECompound(_) => throw CompileError(location, "Can only directly return numeric values")
+            | ExpressionKind.ECompound(_) => throw CompileError.nonfatal(location, "Can only directly return numeric values")
         case ExpressionKind.EStorage(storage) =>
           mcfunc"return run data get storage ${storage}"
         case ExpressionKind.EScoreboard(scoreboard) =>
@@ -252,7 +299,7 @@ object Compiler:
 
     def toScore(compiler: Compiler, code: mutable.ArrayBuffer[String], namespace: String): (String, ScoreKind) throws CompileError =
       kind match
-        case ExpressionKind.EVoid => throw CompileError(location, "Cannot assign void to a value")
+        case ExpressionKind.EVoid => throw CompileError.nonfatal(location, "Cannot assign void to a value")
         case ExpressionKind.EByte(b) => (b.toString, ScoreKind.Direct("set"))
         case ExpressionKind.EShort(s) => (s.toString, ScoreKind.Direct("set"))
         case ExpressionKind.EInteger(i) => (i.toString, ScoreKind.Direct("set"))
@@ -260,12 +307,12 @@ object Compiler:
         case ExpressionKind.EFloat(f) => (f.floor.toInt.toString, ScoreKind.Direct("set"))
         case ExpressionKind.EDouble(d) => (d.floor.toInt.toString, ScoreKind.Direct("set"))
         case ExpressionKind.EBoolean(b) => (if b then "1" else "0", ScoreKind.Direct("set"))
-        case ExpressionKind.EString(_) | ExpressionKind.ESubString(_, _, _) => throw CompileError(location, "Cannot assign string to scoreboard")
-        case ExpressionKind.EArray(_, _) => throw CompileError(location, "Cannot assign array to scoreboard")
-        case ExpressionKind.EByteArray(_) => throw CompileError(location, "Cannot assign array to scoreboard")
-        case ExpressionKind.EIntArray(_) => throw CompileError(location, "Cannot assign array to scoreboard")
-        case ExpressionKind.ELongArray(_) => throw CompileError(location, "Cannot assign array to scoreboard")
-        case ExpressionKind.ECompound(_) => throw CompileError(location, "Cannot assign compound to scoreboard")
+        case ExpressionKind.EString(_) | ExpressionKind.ESubString(_, _, _) => throw CompileError.nonfatal(location, "Cannot assign string to scoreboard")
+        case ExpressionKind.EArray(_, _) => throw CompileError.nonfatal(location, "Cannot assign array to scoreboard")
+        case ExpressionKind.EByteArray(_) => throw CompileError.nonfatal(location, "Cannot assign array to scoreboard")
+        case ExpressionKind.EIntArray(_) => throw CompileError.nonfatal(location, "Cannot assign array to scoreboard")
+        case ExpressionKind.ELongArray(_) => throw CompileError.nonfatal(location, "Cannot assign array to scoreboard")
+        case ExpressionKind.ECompound(_) => throw CompileError.nonfatal(location, "Cannot assign compound to scoreboard")
         case ExpressionKind.EStorage(loc) => (mcfunc"data get storage $loc", ScoreKind.Indirect)
         case ExpressionKind.EScoreboard(loc) => (mcfunc"= $loc", ScoreKind.Direct("operation"))
         case ExpressionKind.EMacro(loc) => (s"$$(${loc.name})", ScoreKind.DirectMacro("set"))
@@ -277,7 +324,7 @@ object Compiler:
 
     def toCondition(compiler: Compiler, code: mutable.ArrayBuffer[String], namespace: String): Condition throws CompileError =
       kind match
-        case ExpressionKind.EVoid => throw CompileError(location, "Can't check void")
+        case ExpressionKind.EVoid => throw CompileError.nonfatal(location, "Can't check void")
         case ExpressionKind.EByte(b) => Condition.Known(b != 0)
         case ExpressionKind.EShort(s) => Condition.Known(s != 0)
         case ExpressionKind.EInteger(i) => Condition.Known(i != 0)
@@ -285,16 +332,16 @@ object Compiler:
         case ExpressionKind.EFloat(f) => Condition.Known(f != 0)
         case ExpressionKind.EDouble(d) => Condition.Known(d != 0)
         case ExpressionKind.EBoolean(b) => Condition.Known(b)
-        case ExpressionKind.EString(_) => throw CompileError(location, "Can't use string as condition")
-        case ExpressionKind.EArray(_, _) => throw CompileError(location, "Can't use array as condition")
-        case ExpressionKind.EByteArray(_) => throw CompileError(location, "Can't use array as condition")
-        case ExpressionKind.EIntArray(_) => throw CompileError(location, "Can't use array as condition")
-        case ExpressionKind.ELongArray(_) => throw CompileError(location, "Can't use array as condition")
-        case ExpressionKind.ECompound(_) => throw CompileError(location, "Can't use compound as condition")
+        case ExpressionKind.EString(_) => throw CompileError.nonfatal(location, "Can't use string as condition")
+        case ExpressionKind.EArray(_, _) => throw CompileError.nonfatal(location, "Can't use array as condition")
+        case ExpressionKind.EByteArray(_) => throw CompileError.nonfatal(location, "Can't use array as condition")
+        case ExpressionKind.EIntArray(_) => throw CompileError.nonfatal(location, "Can't use array as condition")
+        case ExpressionKind.ELongArray(_) => throw CompileError.nonfatal(location, "Can't use array as condition")
+        case ExpressionKind.ECompound(_) => throw CompileError.nonfatal(location, "Can't use compound as condition")
         case ExpressionKind.EStorage(_) | ExpressionKind.EMacro(_) =>
           val scoreboard = compiler.copyToScoreboard(code, this, namespace)
           Condition.And(Condition.Match(scoreboard, MatchRange.Range(Some(Int.MinValue), Some(Int.MaxValue))), Condition.Inverted(Condition.Match(scoreboard, MatchRange.Single(0))))
-        case ExpressionKind.ESubString(_, _, _) => throw CompileError(location, "Can't use string as condition")
+        case ExpressionKind.ESubString(_, _, _) => throw CompileError.nonfatal(location, "Can't use string as condition")
         case ExpressionKind.EScoreboard(loc) =>
           // if score {scoreboard} matches (the entire int range) unless score {scoreboard} matches 0
           // Do this so an unset scoreboard is ALWAYS considered false
@@ -438,6 +485,30 @@ object Compiler:
     case EMacro(loc: StorageLocation)
     case ECondition(cond: Compiler.Condition)
 
+    def executorSensitive: Boolean =
+      this match
+        case EVoid => false
+        case EByte(_) => false
+        case EShort(_) => false
+        case EInteger(_) => false
+        case ELong(_) => false
+        case EFloat(_) => false
+        case EDouble(_) => false
+        case EBoolean(_) => false
+        case EString(_) => false
+        case EArray(values, _) => values.exists(_.kind.executorSensitive)
+        case EByteArray(values) => values.exists(_.kind.executorSensitive)
+        case EIntArray(values) => values.exists(_.kind.executorSensitive)
+        case ELongArray(values) => values.exists(_.kind.executorSensitive)
+        case ECompound(values) => values.values.exists(_.kind.executorSensitive)
+        case EStorage(loc) => false
+        case ESubString(loc, start, end) => false
+        case EScoreboard(loc) =>
+          !loc.name.contains("@")
+        case EMacro(loc) => false
+        case ECondition(cond) => true
+      
+
     def nbtType: NbtType =
       this match
         case ExpressionKind.EVoid => NbtType.Unknown
@@ -509,28 +580,167 @@ object Compiler:
             case Some(EvaluatedCondition.Known(v)) => Some(if v then "1b" else "0b")
             case _ => None
 
+  enum PositionMode:
+    case Absolute, Relative, Caret
+
+    def prefix: String =
+      this match
+        case PositionMode.Absolute => ""
+        case PositionMode.Relative => "~"
+        case PositionMode.Caret => "^"
+ 
+  case class CommandCoord(pos: Double, mode: PositionMode)
+
+  given MCFunctionDisplay[CommandCoord] = x =>
+    s"${x.mode.prefix}${x.pos}"
+
+  object builtinExecute:
+    case class BuiltinExecuteComponent(name: String, run: (Compiler, util.Location, List[BuiltinArg]) => FuncContext ?=> String throws CompileError)
+    object BuiltinExecuteComponent:
+      def make(name: String)(run: (Compiler, util.Location, List[BuiltinArg]) => FuncContext ?=> String throws CompileError): BuiltinExecuteComponent =
+        BuiltinExecuteComponent(name, run)
+
+    object NumericAstExpr:
+      def unapply(it: ast.Expr): Option[Double] =
+        it match
+          case Expr.ZByte(_, b) => Some(b.toDouble)
+          case Expr.ZShort(_, s) => Some(s.toDouble)
+          case Expr.ZInt(_, i) => Some(i.toDouble)
+          case Expr.ZLong(_, l) => Some(l.toDouble)
+          case Expr.ZFloat(_, f) => Some(f.toDouble)
+          case Expr.ZDouble(_, d) => Some(d)
+          case Expr.Unary(_, UnaryKind.Negate, NumericAstExpr(value)) => Some(-value)
+          case _ => None
+
+    object BuiltinRotation:
+      def unapply(it: BuiltinArg): Option[CommandCoord] =
+        it match
+          case BuiltinArg.BExpr(_, BuiltinCommandCoord(rot)) if rot.mode != PositionMode.Caret =>
+            Some(rot)
+          case _ => None
+
+    object BuiltinCommandCoord:
+      def unapply(it: ast.Expr): Option[CommandCoord] =
+        it match
+          case Expr.Unary(_, UnaryKind.Tilde, NumericAstExpr(value)) =>
+            Some(CommandCoord(value, PositionMode.Relative))
+          case Expr.Unary(_, UnaryKind.Caret, NumericAstExpr(value)) =>
+            Some(CommandCoord(value, PositionMode.Caret))
+          case NumericAstExpr(value) =>
+            Some(CommandCoord(value, PositionMode.Absolute))
+          case _ => None
+
+    object BuiltinVec3:
+      def unapply(it: BuiltinArg): Option[(CommandCoord, CommandCoord, CommandCoord)] =
+        it match
+          case BuiltinArg.BExpr(_, Expr.ZList(_, ast.ArrayKind.Any, List(BuiltinCommandCoord(x), BuiltinCommandCoord(y), BuiltinCommandCoord(z)))) =>
+            Some((x, y, z))
+          case _ => None
+      def unapply(it: List[BuiltinArg]): Option[(CommandCoord, CommandCoord, CommandCoord)] =
+        it match
+          case List(BuiltinArg.BExpr(_, BuiltinCommandCoord(x)), BuiltinArg.BExpr(_, BuiltinCommandCoord(y)), BuiltinArg.BExpr(_, BuiltinCommandCoord(z))) =>
+            Some((x, y, z))
+          case _ => None
+
+    object Anchor:
+      def unapply(it: BuiltinArg): Option[String] =
+        it match
+          case BuiltinArg.BExpr(_, Expr.ZString(_, str)) if str == "eyes" || str == "feet" => Some(str)
+          case _ => None
+    val components: Map[String, BuiltinExecuteComponent] =
+      List[BuiltinExecuteComponent](
+        BuiltinExecuteComponent.make("as") { (_, pos, args) => context ?=>
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector))) =>
+              s"as $selector"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected a selector")
+        },
+        BuiltinExecuteComponent.make("at") { (_, pos, args) => context ?=> 
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector))) =>
+              s"at $selector"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected a selector")
+        },
+        BuiltinExecuteComponent.make("align") { (_, pos, args) => context ?=> 
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, axes))) =>
+              s"align $axes"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected string with axes")
+        },
+        BuiltinExecuteComponent.make("anchored") { (_, pos, args) => context ?=>
+          args match
+            case List(Anchor(str)) =>
+              s"anchored $str"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected 'feet' or 'eyes'")
+        },
+        BuiltinExecuteComponent.make("facing") { (_, pos, args) => context ?=> 
+          args match
+            case BuiltinVec3(x, y, z) =>
+              mcfunc"facing $x $y $z"
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector)), Anchor(str)) =>
+              s"facing entity $selector $str"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected either a position, or a selector and an anchor.")
+        },
+        BuiltinExecuteComponent.make("in") { (_, pos, args) => context ?=>
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, dimension))) =>
+              s"in $dimension"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected string with dimension identifier")
+        },
+        BuiltinExecuteComponent.make("on") { (_, pos, args) => context ?=> 
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, relation))) =>
+              s"on $relation"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected relation string")
+        },
+        BuiltinExecuteComponent.make("positioned") { (_, pos, args) => context ?=>
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector))) =>
+              s"positioned as $selector"
+            case BuiltinVec3(x, y, z) =>
+              mcfunc"positioned $x $y $z"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected selector or position")
+        },
+        BuiltinExecuteComponent.make("rotated") { (_, pos, args) => context ?=>
+          args match
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector))) =>
+              s"rotated as $selector"
+            case List(BuiltinRotation(yaw), BuiltinRotation(pitch)) =>
+              mcfunc"rotated $yaw $pitch"
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected selector or rotation")
+        },
+      ).map(it => (it.name, it)).toMap
 
   val builtins: Map[String, Builtin] =
     List[Builtin](
       Builtin.sideEffect("scoreboard") { (compiler, pos, args, location) => 
         val (score, criteria) =
           args match
-            case List(Expr.ZVariable(_, path)) =>
+            case List(BuiltinArg.BExpr(_, Expr.ZVariable(_, path))) =>
               (ResourceLocation.resolveResource(location, path), "dummy")
-            case List(Expr.ZVariable(_, path), Expr.ZString(_, crit)) =>
+            case List(BuiltinArg.BExpr(_, Expr.ZVariable(_, path)), BuiltinArg.BExpr(_, Expr.ZString(_, crit))) =>
               (ResourceLocation.resolveResource(location, path), crit)
             case _ =>
-              throw CompileError(pos, "Expected a path and optionally a criteria type.")
+              throw CompileError.nonfatal(pos, "Expected a path and optionally a criteria type.")
       
         compiler.useScoreboard(ScoreboardLocation.scoreboardStringOf(score), criteria)
       },
       Builtin.exprOnly("reset") { (_, pos, args) => context ?=>
         val (name, score) =
           args match
-            case List(Expr.ZString(_, name), Expr.ZVariable(_, path)) =>
+            case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, Expr.ZVariable(_, path))) =>
               (name, path)
             case _ =>
-              throw CompileError(pos, "Expected a name and a path")
+              throw CompileError.nonfatal(pos, "Expected a name and a path")
         
         val scoreboardLoc = ScoreboardLocation(ResourceLocation.resolveResource(context.location, score), name)
         context.code.append(mcfunc"scoreboard players reset ${scoreboardLoc}")
@@ -540,30 +750,83 @@ object Compiler:
       },
       Builtin.exprOnly("enable") { (_, pos, args) => context ?=>
         args match
-          case List(Expr.ZString(_, name), Expr.ZVariable(_, score)) =>
+          case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, Expr.ZVariable(_, score))) =>
             val scoreboardLoc = ScoreboardLocation(ResourceLocation.resolveResource(context.location, score), name)
             context.code.append(mcfunc"scoreboard players enable ${scoreboardLoc}")
 
             Expression.void(pos)
           case _ =>
-            throw CompileError(pos, "Expected a name and a path.")
+            throw CompileError.nonfatal(pos, "Expected a name and a path.")
 
 
       },
       Builtin.exprOnly("condition") { (_, pos, args) => context ?=>
         args match
-          case List(Expr.ZString(_, checkCode)) =>
+          case List(BuiltinArg.BExpr(_, Expr.ZString(_, checkCode))) =>
             Expression(pos, false, ExpressionKind.ECondition(Condition.Check(checkCode)))
           case _ =>
-            throw CompileError(pos, "Expected check code (the bit that comes after `if` in execute commands)")
+            throw CompileError.nonfatal(pos, "Expected check code (the bit that comes after `if` in execute commands)")
       },
       Builtin.insertOnly("scoreboard_string") { (_, pos, args) => context ?=>
         args match
-          case List(Expr.ZVariable(_, path)) =>
+          case List(BuiltinArg.BExpr(_, Expr.ZVariable(_, path))) =>
             val resolved = ResourceLocation.resolveResource(context.location, path)
             ScoreboardLocation.scoreboardStringOf(resolved)
           case _ =>
-            throw CompileError(pos, "Expected path")
+            throw CompileError.nonfatal(pos, "Expected path")
+      },
+      Builtin.exprOnly("execute") { (compiler, pos, args) => context ?=> 
+        args match
+          case Nil =>
+            throw CompileError.nonfatal(pos, "Expected at least 1 argument")
+          case _ =>
+            val inits = args.init
+            val last = args.last
+            val strs = inits.map:
+              case BuiltinArg.BExpr(_, Expr.ZBuiltinCall(callPos, ast.BuiltinCall(name, args))) =>
+                builtinExecute.components.get(name) match
+                  case Some(value) =>
+                    value.run(compiler, callPos, args)
+                  case None =>
+                    compiler.report.nonFatal(CompileError.nonfatal(callPos, s"No such execute builtin $name"))
+                    ""
+              case _ =>
+                compiler.report.nonFatal(CompileError.nonfatal(pos, "Expected a builtin call for all but the last argument"))
+                ""
+            val finalCommand =
+              last match
+                case BuiltinArg.BExpr(_, Expr.ZBuiltinCall(_, ast.BuiltinCall("inline", List(BuiltinArg.BExpr(_, Expr.ZFunctionCall(pos, call)))))) =>
+                  val (command, _) = compiler.compileFunctionCall(pos, call)
+                  command.mcdisplay
+                case BuiltinArg.BExpr(_, Expr.ZFunctionCall(pos, call)) =>
+                  if call.args.exists(_.executorSensitive) then
+                    compiler.report.warning:
+                      CompileError.nonfatal(pos, 
+                      Seq(
+                        "There's an argument to this function that is executor sensitive or could be changed between calls.",
+                        "To make the argument get evaluated for each call, use a block instead of an inline call.",
+                        "To surpress this warning, wrap the call in an @inline call."
+                      ))
+                  val (command, _) = compiler.compileFunctionCall(pos, call)
+                  command.mcdisplay
+                case BuiltinArg.BBlock(pos, stmts) =>
+                  val func = compiler.nextFunction("execute", context.location.namespace)
+                  val subContext = context.nested(NestKind.Transparent, func, None)
+                  compiler.compileBlock(stmts)(using subContext)
+                  subContext.code.length match
+                    case 0 => throw CompileError.nonfatal(pos, "Block must have at least 1 output command")
+                    case 1 => subContext.code.head
+                    case _ =>
+                      compiler.addFunctionItem(util.Location.blank, func, subContext.code.toList)
+                      mcfunc"function $func"
+                case _ =>
+                  throw CompileError.nonfatal(pos, "Expected block or function call")
+            
+            val executeCommand = s"execute ${strs.mkString(" ")} run $finalCommand"
+            context.code.append(executeCommand)
+            Expression.void(pos)
+
+                  
 
       }
     ).map(it => (it.name, it)).toMap
@@ -573,19 +836,19 @@ object Compiler:
 
     @nowarn("id=E198")
     def expr(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
-      throw CompileError(pos, s"The $name builtin doesn't work in expressions")
+      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in expressions")
 
     @nowarn("id=E198")
     def inserted(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): String throws CompileError =
-      throw CompileError(pos, s"The $name builtin doesn't work in inserts")
+      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in inserts")
 
     @nowarn("id=E198")
     def decl(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall, location: ResourceLocation): Unit throws CompileError =
-      throw CompileError(pos, s"The $name builtin doesn't work at toplevel")
+      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work at toplevel")
 
   object Builtin:
     // Side effect that can be in Expr or Decl position
-    def sideEffect(nameArg: String)(func: (Compiler, util.Location, List[ast.Expr],ResourceLocation) => Unit throws CompileError): Builtin =
+    def sideEffect(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg],ResourceLocation) => Unit throws CompileError): Builtin =
       new Builtin:
         override val name: String = nameArg
 
@@ -597,7 +860,7 @@ object Compiler:
         override def decl(compiler: Compiler, pos: Location, call: ast.BuiltinCall, location: ResourceLocation): Unit throws CompileError =
           func(compiler, pos, call.args, location)
 
-    def insertOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.Expr]) => FuncContext ?=> String throws CompileError): Builtin =
+    def insertOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg]) => FuncContext ?=> String throws CompileError): Builtin =
       new Builtin:
         override val name: String = nameArg
 
@@ -606,7 +869,7 @@ object Compiler:
           func(compiler, pos, call.args)
 
 
-    def exprOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.Expr]) => FuncContext ?=> Expression throws CompileError): Builtin =
+    def exprOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg]) => FuncContext ?=> Expression throws CompileError): Builtin =
       new Builtin:
         override val name: String = nameArg
 
@@ -993,6 +1256,15 @@ class Compiler:
   val namespaces: mutable.HashMap[String, FileTree.Namespace] = mutable.HashMap()
   val counters: mutable.HashMap[String, Int] = mutable.HashMap()
   var config: Option[Json] = None
+  val nonFatalErrors: mutable.ArrayBuffer[CompileError] = mutable.ArrayBuffer()
+  val warnings: mutable.ArrayBuffer[CompileError] = mutable.ArrayBuffer()
+
+  object report:
+    def nonFatal(err: CompileError): Unit =
+      nonFatalErrors.append(err)
+
+    def warning(err: CompileError): Unit =
+      warnings.append(err)
 
   def nextCounter(name: String): Int =
     if counters.contains(name) then
@@ -1063,7 +1335,7 @@ class Compiler:
         case ZBuiltinCall(_, _) => ()
         case ZConfig(pos, data) =>
           if Compiler.this.config.isDefined then
-            throw CompileError(pos, "Duplicate MCMeta")
+            throw CompileError.nonfatal(pos, "Duplicate MCMeta")
           else
             Compiler.this.config = Some(data)
     }
@@ -1104,9 +1376,9 @@ class Compiler:
     items.foreach: i =>
       (i, item) match
         case (FileTree.Item.ZFunction(name, _, _), FileTree.Item.ZFunction(name2, _, loc)) if name == name2 =>
-          throw CompileError(loc, s"Function \"${name2}\" is already defined.")
+          throw CompileError.nonfatal(loc, s"Function \"${name2}\" is already defined.")
         case (a: FileTree.Item.ZTextResource, b: FileTree.Item.ZTextResource) if a == b =>
-          throw CompileError(b.location, s"${b.kind} \"${b.name}\" is already defined")
+          throw CompileError.nonfatal(b.location, s"${b.kind} \"${b.name}\" is already defined")
         case _ => ()
     
     items.append(item)
@@ -1152,9 +1424,15 @@ class Compiler:
     val function = FileTree.Item.ZFunction(name, commands, location)
     addItem(module, function)
 
-  private def compileBlock(block: List[parser.ast.Stmt])(using context: FuncContext): Unit throws CompileError =
+  private def compileBlock(block: List[parser.ast.Stmt])(using context: FuncContext): Unit throws FatalCompileError =
     block.foreach: stmt =>
-      compileStatement(stmt)
+      try
+        compileStatement(stmt)
+      catch
+        case x: CompileError =>
+          x match
+            case y: FatalCompileError => throw y
+            case y: NonfatalCompileError => report.nonFatal(y)
 
 
   private def compileIfStatementWithoutChild(condition: parser.ast.Expr, body: List[parser.ast.Stmt], isChild: Boolean)(using context: FuncContext): Unit throws CompileError =
@@ -1183,7 +1461,11 @@ class Compiler:
               else
                 mcfunc"function ${func}"
         if command.nonEmpty then
-          val executeCommand = s"execute ${checkCode} ${if isChild then "run return run" else "run"} ${command}"
+          val executeCommand = 
+            if command.startsWith("execute ") && !isChild then
+              s"execute ${checkCode} ${command.substring(8)}"
+            else
+              s"execute ${checkCode} ${if isChild then "run return run" else "run"} ${command}"
           context.code.append(executeCommand) 
         
               
@@ -1324,8 +1606,6 @@ class Compiler:
         if subContext.hasNestedContinue.value then
           context.hasNestedContinue.value = true
           generateNestedContinue()
-        // Right now we don't actually check nested continues here. They are only for if statement to not fuck it up
-        // When labelled continues are implemented, then it'll have to be checked
       case s: Stmt.ZFor =>
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
@@ -1341,13 +1621,56 @@ class Compiler:
         if subContext.hasNestedContinue.value then
           context.hasNestedContinue.value = true
           generateNestedContinue()
-
-
+      case foras: Stmt.ZForAs =>
+        compileForAs(foras)
+      case forat: Stmt.ZForAt =>
+        compileForAt(forat)
+      case Stmt.ZSpawnCall(pos, call, delay) =>
+        val (command, _) = compileFunctionCall(pos, call)
+        command match
+          case FunctionCommand.MacroCall(_, _) =>
+            report.nonFatal:
+              CompileError.nonfatal(pos, 
+                Seq(
+                  "Spawn calls can't call macro functions."
+                ))
+          case _ => ()
+        context.code.append(mcfunc"schedule $command ${delay.toString}")
       case Stmt.ZReturn(_, expr) => compileReturn(expr)
       case Stmt.ZContinue(pos, label) =>
         compileContinue(pos, label)
       case Stmt.ZBreak(pos, label) =>
         compileBreak(pos, label)
+
+  def compileForAt(forat: ast.Stmt.ZForAt)(using context: FuncContext): Unit throws CompileError =
+    val func = nextFunction("forat", context.location.namespace)
+    val subContext = context.nested(NestKind.Transparent, func, None)
+    compileBlock(forat.body)(using subContext)
+    subContext.code.length match
+      case 0 => ()
+      case 1 =>
+        if subContext.code.head.startsWith("execute ") then
+          context.code.append(s"execute at ${forat.selector} ${subContext.code.head.substring(8)}")
+        else  
+          context.code.append(s"execute at ${forat.selector} run ${subContext.code.head}")
+      case _ =>
+        addFunctionItem(util.Location.blank, func, subContext.code.toList)
+        context.code += mcfunc"execute at ${forat.selector} run function $func"
+
+  def compileForAs(foras: ast.Stmt.ZForAs)(using context: FuncContext): Unit throws CompileError =
+    val func = nextFunction("foras", context.location.namespace)
+    val subContext = context.nested(NestKind.Transparent, func, None)
+    compileBlock(foras.body)(using subContext)
+    subContext.code.length match
+      case 0 => ()
+      case 1 =>
+        if subContext.code.head.startsWith("execute ") then
+          context.code.append(s"execute as ${foras.selector} ${subContext.code.head.substring(8)}")
+        else  
+          context.code.append(s"execute as ${foras.selector} run ${subContext.code.head}")
+      case _ =>
+        addFunctionItem(util.Location.blank, func, subContext.code.toList)
+        context.code += mcfunc"execute as ${foras.selector} run function $func"
 
   object internals:
     // TODO: do this idiomatically
@@ -1443,7 +1766,7 @@ class Compiler:
     )
 
   def cleanCommandString(str: String): String =
-    str.split(raw"\r?\n\w*").mkString(" ")
+    str.split(raw"\r?\n\s*").mkString(" ")
 
   object insertedExpr:
     def compile(part: CommandPart.Inserted)(using context: FuncContext): (String, Boolean) throws CompileError =
@@ -1453,7 +1776,15 @@ class Compiler:
         case InsertedExpr.ScoreboardVariable(_, path) =>
           val scoreboard = ScoreboardLocation.resolveResource(context.location, path)
           (scoreboard.mcdisplay, false)
-        case InsertedExpr.ResourceRef(_, path) =>
+        case InsertedExpr.ResourceRef(pos, path) =>
+          if path.namespace.isEmpty then
+            report.warning:
+              CompileError.nonfatal(pos,
+                Seq(
+                  "This inserted path has no namespace - this means it's being interpreted as a variable relative",
+                  "to the current function.",
+                  "If you want it to be relative to the current module, prefix it with ~/"
+                ))
           val resolved = ResourceLocation.resolveResource(context.location, path)
           (resolved.mcdisplay, false)
         case InsertedExpr.ZBlock(pos, mayBeInlined, stmts) =>
@@ -1461,16 +1792,44 @@ class Compiler:
           val subContext = context.nested(NestKind.Transparent, func, None)
           compileBlock(stmts)(using subContext)
           subContext.code.length match
-            case 0 => throw CompileError(pos, "Inserted blocks must have at least one statement")
+            case 0 => throw CompileError.nonfatal(pos, "Inserted blocks must have at least one statement")
             case 1 if mayBeInlined =>
               (subContext.code.head, false)
             case _ =>
               addFunctionItem(util.Location.blank, func, subContext.code.toList)
               (mcfunc"function ${func}", false)
           
-
         case InsertedExpr.ZBuiltinCall(pos, call) =>
           (builtins.compileInserted(pos, call), false)
+        case InsertedExpr.ZFunctionCall(pos, call, pollute) =>
+          if !pollute && call.args.exists(_.executorSensitive) then
+            report.warning:
+              CompileError.nonfatal(pos, 
+                Seq(
+                  "This function call has arguments that may be executor sensitive, or be affected by commands inside the function.", 
+                  "To call it while evaluating the arguments only once and in the current scope,", 
+                  "add a @ after the &.",
+                  "To evaluate the arguments for each call, and inside the command's scope, use a block (&!).",
+                  "Note: the function itself will always be executed in the command's scope",
+                  "this warning only affects the arguments."
+                )
+              )
+          val (command, _) = compileFunctionCall(pos, call)
+          command match
+            case FunctionCommand.MacroCall(_, _) if !pollute =>
+              report.warning:
+                CompileError.nonfatal(pos,
+                  Seq(
+                    "This function call requires macros -",
+                    "If this is inside a schedule function, this will not work.",
+                    "If you would like to use macros where it would be acceptable in vanilla, add @ after the &.",
+                    "If you want to use it where it would NOT be acceptable, make it a block (&!)"
+                  )
+                )
+            case _ => ()
+          
+          (command.mcdisplay, false)
+
 
 
   def compileCommand(command: parser.ast.Stmt.Command)(using context: FuncContext): String throws CompileError =
@@ -1513,7 +1872,7 @@ class Compiler:
               | ExpressionKind.ECompound(_)
               | ExpressionKind.ESubString(_, _, _)
               | ExpressionKind.ECondition(_)
-              | ExpressionKind.EBoolean(_) => throw CompileError(pos, "Can only negate numbers")
+              | ExpressionKind.EBoolean(_) => throw CompileError.nonfatal(pos, "Can only negate numbers")
         case ExpressionKind.EByte(b) =>
           ExpressionKind.EByte((-b).toByte)
         case ExpressionKind.EShort(s) =>
@@ -1550,6 +1909,8 @@ class Compiler:
     expr.kind match
       case UnaryKind.Not => compileNot(expr.pos, expr.expr)
       case UnaryKind.Negate => compileNegate(expr.pos, expr.expr)
+      case UnaryKind.Caret => throw CompileError.nonfatal(expr.pos, "^ is invalid in normal expressions")
+      case UnaryKind.Tilde => throw CompileError.nonfatal(expr.pos, "~ is invalid in normal expressions")
 
   def compileNumericOperation(left: parser.ast.Expr, operator: ScoreboardOperation, right: parser.ast.Expr)(using context: FuncContext): Expression throws CompileError =
     val l = compileExpression(left, false)
@@ -1600,7 +1961,7 @@ class Compiler:
         useScoreboard(scoreboard.scoreboardString)
         l
         
-      case _ => throw CompileError(left.pos, "Can only assign to a variable")
+      case _ => throw CompileError.nonfatal(left.pos, "Can only assign to a variable")
 
 
   def compileMatchComparison(code: mutable.ArrayBuffer[String], value: Expression, range: MatchRange, namespace: String): ExpressionKind throws CompileError =
@@ -1628,7 +1989,7 @@ class Compiler:
         val kind =
           (l.kind, r.kind) match
             case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-              throw CompileError(left.pos, "Cannot compare with void.")
+              throw CompileError.nonfatal(left.pos, "Cannot compare with void.")
             case (ExpressionKind.EStorage(_), _) | (_, ExpressionKind.EStorage(_)) =>
               storageComparison(context.code, l, r, false, context.location.namespace)
             case (leftKind, rightKind) if leftKind.nbtType.numeric && rightKind.nbtType.numeric =>
@@ -1653,7 +2014,7 @@ class Compiler:
         val kind = 
           (l.kind, r.kind) match
             case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-              throw CompileError(left.pos, "Cannot compare with void.")
+              throw CompileError.nonfatal(left.pos, "Cannot compare with void.")
             case (ExpressionKind.EStorage(_), _) | (_, ExpressionKind.EStorage(_)) =>
               storageComparison(context.code, l, r, true, context.location.namespace)
             case (ExpressionKind.Numeric(v), _) =>
@@ -1676,11 +2037,11 @@ class Compiler:
     val kind =
       (l.kind, r.kind) match
         case (ExpressionKind.EVoid, _) | (_, ExpressionKind.EVoid) =>
-          throw CompileError(left.pos, "Cannot compare with void.")
+          throw CompileError.nonfatal(left.pos, "Cannot compare with void.")
         case (ExpressionKind.EBoolean(_), _) | (_, ExpressionKind.EBoolean(_)) =>
-          throw CompileError(left.pos, "Cannot compare with boolean.")
+          throw CompileError.nonfatal(left.pos, "Cannot compare with boolean.")
         case (ExpressionKind.EString(_), _) | (_, ExpressionKind.EString(_)) =>
-          throw CompileError(left.pos, "Cannot compare with string.")
+          throw CompileError.nonfatal(left.pos, "Cannot compare with string.")
         case (ExpressionKind.Numeric(lv), ExpressionKind.Numeric(rv)) =>
           ExpressionKind.EBoolean(comparator.constOp(lv, rv))
         case (ExpressionKind.Numeric(lv), _) =>
@@ -1745,7 +2106,7 @@ class Compiler:
       case BinopKind.DivAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Div, expr.r)
       case BinopKind.ModAssign => compileOperatorAssignment(expr.l, ScoreboardOperation.Mod, expr.r)
 
-  def compileFunctionCall(pos: util.Location, functionCall: parser.ast.FunctionCall)(using context: FuncContext): (String, CalledFunction) throws CompileError =
+  def compileFunctionCall(pos: util.Location, functionCall: parser.ast.FunctionCall)(using context: FuncContext): (FunctionCommand, CalledFunction) throws CompileError =
     val path = ResourceLocation.resolveResource(context.location.module, functionCall.path)
     val functionDefinition =
       functionRegistry.get(path) match
@@ -1768,7 +2129,7 @@ class Compiler:
             context.code.appendAll(defaultContext.code)
             defaultContext.code.clear()
             expr
-          case (false, None) => throw CompileError(pos, "Expected more arguments")
+          case (false, None) => throw CompileError.nonfatal(pos, "Expected more arguments")
       parameter.kind match
         case ParameterKind.Storage =>
           val storage = StorageLocation(parameterStorage, parameter.name)
@@ -1784,9 +2145,9 @@ class Compiler:
 
     val command =
       if hasMacroArgs then
-        mcfunc"function ${functionDefinition.location} with storage ${parameterStorage}"
+        FunctionCommand.MacroCall(functionDefinition.location, parameterStorage)
       else
-        mcfunc"function ${functionDefinition.location}"
+        FunctionCommand.PlainCall(functionDefinition.location)
 
     (command, CalledFunction(functionDefinition.location, functionDefinition.returnType))
     
@@ -1795,7 +2156,7 @@ class Compiler:
   def compileContinue(pos: util.Location, label: Option[String])(using context: FuncContext): Unit throws CompileError =
     val (nestInfo, curLoop) = context.nestInfo.flatMap { nestInfo =>
       nestInfo.getLoop.map(it => (nestInfo, it))
-    }.getOrElse(throw CompileError(pos, "continue may only be inside of loops"))
+    }.getOrElse(throw CompileError.nonfatal(pos, "continue may only be inside of loops"))
     if !nestInfo.isLoop || (label.isDefined && nestInfo.label != label) then
       context.hasNestedContinue.value = true
       label.foreach: it =>
@@ -1812,7 +2173,7 @@ class Compiler:
   def compileBreak(pos: util.Location, label: Option[String])(using context: FuncContext): Unit throws CompileError =
     val (nestInfo, _) = context.nestInfo.flatMap { nestInfo =>
       nestInfo.getLoop.map(it => (nestInfo, it))
-    }.getOrElse(throw CompileError(pos, "break may only be inside of loops"))
+    }.getOrElse(throw CompileError.nonfatal(pos, "break may only be inside of loops"))
     if !nestInfo.isLoop || (label.isDefined && nestInfo.label != label) then
       context.hasNestedBreak.value = true
       label.foreach: it =>
@@ -1866,19 +2227,19 @@ class Compiler:
     def compileDecl(pos: util.Location, call: ast.BuiltinCall, location: ResourceLocation): Unit throws CompileError =
       Compiler.builtins.get(call.name) match
         case Some(v) => v.decl(Compiler.this, pos, call, location)
-        case _ => throw CompileError(pos, s"No such builtin ${call.name}")
+        case _ => throw CompileError.nonfatal(pos, s"No such builtin ${call.name}")
 
 
     def compileInserted(pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): String throws CompileError =
       Compiler.builtins.get(call.name) match
         case Some(v) => v.inserted(Compiler.this, pos, call)
-        case _ => throw CompileError(pos, s"No such builtin ${call.name}")
+        case _ => throw CompileError.nonfatal(pos, s"No such builtin ${call.name}")
 
 
     def compile(pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
       Compiler.builtins.get(call.name) match
         case Some(v) => v.expr(Compiler.this, pos, call)
-        case _ => throw CompileError(pos, s"No such builtin ${call.name}")
+        case _ => throw CompileError.nonfatal(pos, s"No such builtin ${call.name}")
 
 
 
@@ -1893,7 +2254,7 @@ class Compiler:
     kinds.foreach: kind =>
       (kind.kind, singleType) match
         case (ExpressionKind.EVoid, _) =>
-          throw CompileError(kind.location, "Cannot use void as a value")
+          report.nonFatal(CompileError.nonfatal(kind.location, "Cannot use void as a value"))
         case (typ, NbtType.Unknown) =>
           singleType = typ.nbtType
         case (t, NbtType.Numeric) if t.nbtType.numeric =>
@@ -1911,7 +2272,7 @@ class Compiler:
         case (ExpressionKind.EArray(_, _), NbtType.List) => ()
         case (ExpressionKind.ECondition(_), NbtType.Byte) => ()
         case _ =>
-          throw CompileError(kind.location, message)
+          report.nonFatal(CompileError.nonfatal(kind.location, message))
     
     if singleType == NbtType.Numeric then
       singleType = NbtType.Int
@@ -1970,34 +2331,42 @@ class Compiler:
         builtins.compile(pos, call)
       case Expr.ZFunctionCall(pos, functionCall) =>
         val (command, called) = compileFunctionCall(pos, functionCall)
+        // can be either macro or non macro
+        val commandStr = command.mcdisplay
         called.returnType match
           case ReturnType.Storage =>
             val storage = StorageLocation(called.location, "return")
             if !ignored then
               context.code.append(mcfunc"data modify storage ${storage} set value false")
-            context.code.append(command)
+            context.code.append(commandStr)
             Expression(expr.pos, false, ExpressionKind.EStorage(storage))
           case ReturnType.Scoreboard =>
             val scoreboard = ScoreboardLocation(called.location, "$return")
             if !ignored then
               context.code.append(mcfunc"scoreboard players set ${scoreboard} 0")
-            context.code.append(command)
+            context.code.append(commandStr)
             Expression(expr.pos, false, ExpressionKind.EScoreboard(scoreboard))
           case ReturnType.Direct =>
             val scoreboard = nextScoreboard(context.location.namespace)
-            context.code.append(mcfunc"execute store result score ${scoreboard} run ${command}")
+            context.code.append(mcfunc"execute store result score ${scoreboard} run ${commandStr}")
             Expression(expr.pos, false, ExpressionKind.EScoreboard(scoreboard))
         
 
       case Expr.Atom(pos, expr) => compileExpression(expr, ignored)
 
-  def compileModule(module: parser.ast.Decl.Module, location: ResourceLocation): Unit throws CompileError =
+  def compileModule(module: parser.ast.Decl.Module, location: ResourceLocation): Unit throws FatalCompileError =
     enterScope(module.name)
     // TODO: comptime
 
     val newLocation = location.join(module.name)
     module.items.foreach: item =>
-      compileItem(item, newLocation)
+      try
+        compileItem(item, newLocation)
+      catch
+        case x: CompileError =>
+          x match
+            case y: NonfatalCompileError => report.nonFatal(y)
+            case y: FatalCompileError => throw y
     exitScope()
     // TODO: comptime
   def compileNamespace(ast: parser.ast.Namespace): Unit throws CompileError =
@@ -2037,17 +2406,35 @@ class Compiler:
     
     FileTree(namespaces.values.toList)
 
-  def compile(file: List[parser.ast.Namespace], output: String, force: Boolean): Unit throws CompileError =
+  def compile(file: List[parser.ast.Namespace], output: String, force: Boolean): Either[CompileError, Unit] =
     import java.nio.file.{Files, Path}
     val rootPath = Path.of(output)
     if !force && Files.exists(rootPath) && !Files.exists(rootPath.resolve("yaoi.txt")) then
-      throw CompileError(util.Location.blank, "The output directory has data in it, \nbut it's not made by yaoigen (no yaoi.txt); use --force to force")
+      Left(CompileError.fatal(util.Location.blank, "The output directory has data in it, \nbut it's not made by yaoigen (no yaoi.txt); use --force to force"))
     else
-      register(file)
+      try
+        register(file)
 
-      val tree = compileTree(file)
+        val tree = compileTree(file)
 
-      tree.generate(output, this.config.getOrElse(MCMeta(MCMetaPack(description = "", packFormat = 48)).asJson))
+        if nonFatalErrors.isEmpty then
+          tree.generate(output, this.config.getOrElse(MCMeta(MCMetaPack(description = "", packFormat = 48)).asJson))
+        Right(())
+
+      catch
+        case x: CompileError =>
+          Left(x)
+      finally
+        warnings.foreach: warning =>
+          println("Warning:")
+          println(warning.showPretty)
+
+        nonFatalErrors.foreach: error =>
+          println("Error:")
+          println(error.showPretty)
+
+
+      
 
 
   def nextScoreboard(namespace: String): ScoreboardLocation =
@@ -2088,7 +2475,7 @@ class Compiler:
             | ExpressionKind.EIntArray(_)
             | ExpressionKind.ELongArray(_)
             | ExpressionKind.ESubString(_, _, _)
-            | ExpressionKind.ECompound(_) => throw CompileError(value.location, "Can only perform operations on numbers.")
+            | ExpressionKind.ECompound(_) => throw CompileError.nonfatal(value.location, "Can only perform operations on numbers.")
       case ExpressionKind.Numeric(value) =>
         operation.nativeOperator match
           case Some(native) =>

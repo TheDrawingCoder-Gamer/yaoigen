@@ -6,6 +6,7 @@ import cats.implicits.*
 import gay.menkissing.yaoigen.util.FileInfo
 import parsley.token.Lexer
 import parsley.token.descriptions.*
+import parsley.errors.combinator.*
 import text.*
 import parsley.token.predicate.Basic
 import parsley.combinator.*
@@ -196,14 +197,14 @@ class Parser(val fileInfo: FileInfo):
       lexeme.braces(lexeme.commaSep((objectKey <~ lexeme.symbol.colon) <~> jvalue).map(Json.fromFields) <~ optional(lexeme.symbol.comma))
 
   lazy val expr: Parsley[ast.Expr] = {
-    atomic(choice(
+    choice(
       op,
       primary
-    ))
+    ).label("Invalid expression")
   }
 
-  lazy val functionCall: Parsley[ast.Expr] = {
-    ast.Expr.ZFunctionCall(ast.FunctionCall(unresolvedResource, lexeme.parens(lexeme.commaSep(expr))))
+  lazy val functionCall: Parsley[ast.FunctionCall] = {
+    ast.FunctionCall(unresolvedResource, lexeme.parens(lexeme.commaSep(expr)))
   }
 
   lazy val primary: Parsley[ast.Expr] = {
@@ -221,11 +222,11 @@ class Parser(val fileInfo: FileInfo):
       list,
       compound,
       ast.Expr.ZString(lexeme.string.fullUtf16),
-      atomic(functionCall),
+      atomic(ast.Expr.ZFunctionCall(functionCall)),
       atomic(builtinCallExpr),
       ast.Expr.ZScoreboardVariable(parsley.character.char('$') *> scoreboardResource),
       ast.Expr.ZMacroVariable(parsley.character.char('%') *> lexeme.names.identifier),
-      atomic(ast.Expr.ZVariable(unresolvedResource))
+      ast.Expr.ZVariable(unresolvedResource)
     )
   }
 
@@ -290,8 +291,12 @@ class Parser(val fileInfo: FileInfo):
   lazy val builtinCallExpr: Parsley[ast.Expr] =
     ast.Expr.ZBuiltinCall(builtinCall)
 
+  lazy val builtinArg: Parsley[ast.BuiltinArg] =
+    ast.BuiltinArg.BBlock(block)
+    <|> ast.BuiltinArg.BExpr(expr)
+
   lazy val builtinCall: Parsley[ast.BuiltinCall] =
-    ast.BuiltinCall(nonlexeme.symbol("@") ~> lexeme.names.identifier, lexeme.parens(lexeme.commaSep(expr)))
+    ast.BuiltinCall(nonlexeme.symbol("@") ~> lexeme.names.identifier, lexeme.parens(lexeme.commaSep(builtinArg)))
 
   lazy val op: Parsley[ast.Expr] = {
     import parsley.expr.*
@@ -300,7 +305,7 @@ class Parser(val fileInfo: FileInfo):
     parsley.expr.precedence(
       primary
     )(
-      Ops[ast.Expr](Prefix)(Unary(UnaryKind.Negate <# "-"), Unary(UnaryKind.Not <# "!")),
+      Ops[ast.Expr](Prefix)(Unary(UnaryKind.Negate <# "-"), Unary(UnaryKind.Not <# "!"), Unary(UnaryKind.Tilde <# "~"), Unary(UnaryKind.Caret <# "^")),
       Ops[ast.Expr](InfixL)(Binop(BinopKind.Modulo <# "%")),
       Ops[ast.Expr](InfixL)(Binop(BinopKind.Divide <# "/"), Binop(BinopKind.Times <# "*")),
       Ops[ast.Expr](InfixL)(Binop(BinopKind.Plus <# "+"), Binop(BinopKind.Minus <# "-")),
@@ -322,6 +327,9 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val stmt: Parsley[ast.Stmt] = {
       (quotedCommand <~ optional(lexeme.symbol.semi))
+      <|> spawnCall
+      <|> forAsStmt
+      <|> forAtStmt
       <|> labeledDefinition
       <|> continueStmt
       <|> breakStmt
@@ -338,15 +346,16 @@ class Parser(val fileInfo: FileInfo):
     ast.Stmt.ZBreak(lexeme.symbol("break") ~> option(labelReference)) <~ optional(lexeme.symbol.semi)
 
   def commandPartShared(invalidCharacters: String): Parsley[ast.CommandPart] =
-    atomicChoice(
-      ast.CommandPart.Inserted(nonlexeme.symbol("&!") ~> ast.InsertedExpr.ZBlock(option(nonlexeme.symbol("!")).map(_.nonEmpty), lexeme.symbol.openBrace ~> Parsley.many(atomic(stmt)) <~ nonlexeme.symbol("}"))),
-      ast.CommandPart.Inserted(nonlexeme.symbol("%") ~> ast.InsertedExpr.MacroVariable(nonlexeme.names.identifier)),
-      ast.CommandPart.Inserted(nonlexeme.symbol("&") ~> (lexeme.symbol.openBrace ~> inlineInserted <~ nonlexeme.symbol("}"))),
-      ast.CommandPart.Literal(parsley.character.string("\\&") #> "&"),
-      ast.CommandPart.Literal(parsley.character.string("\\%") #> "%"),
-      ast.CommandPart.Literal(parsley.character.string("\\`") #> "`"),
-      ast.CommandPart.Literal(parsley.character.stringOfSome(it => !invalidCharacters.contains(it)))
-    )
+    atomic(ast.CommandPart.Inserted(nonlexeme.symbol("&!") ~> ast.InsertedExpr.ZBlock(option(nonlexeme.symbol("!")).map(_.nonEmpty), lexeme.symbol.openBrace ~> Parsley.many(atomic(stmt)) <~ nonlexeme.symbol("}"))))
+    <|> atomic(ast.CommandPart.Inserted(nonlexeme.symbol("%") ~> ast.InsertedExpr.MacroVariable(nonlexeme.names.identifier)))
+    <|> ast.CommandPart.Inserted(lexeme.symbol("&@{") ~> insertedFunctionCall.map(_(true)) <~ nonlexeme.symbol("}"))
+    <|> (atomic(lexeme.symbol("&{")) ~> ast.CommandPart.Inserted(inlineInserted <~ nonlexeme.symbol("}")))
+    // if we got here, then it must have been an invalid insert
+    <|> atomic(ast.CommandPart.Literal(parsley.character.string("&") #> "&"))
+    <|> atomic(ast.CommandPart.Literal(parsley.character.string("%") #> "%"))
+    <|> atomic(ast.CommandPart.Literal(parsley.character.string("\\`") #> "`"))
+    <|> ast.CommandPart.Literal(parsley.character.stringOfSome(it => !invalidCharacters.contains(it)))
+    
 
   lazy val quotedCommandPart: Parsley[ast.CommandPart] =
     commandPartShared("`&%")
@@ -354,25 +363,35 @@ class Parser(val fileInfo: FileInfo):
   lazy val unquotedCommandPart: Parsley[ast.CommandPart] =
     commandPartShared("`&%\n")
 
+  lazy val insertedFunctionCall: Parsley[Boolean => ast.InsertedExpr.ZFunctionCall] =
+    ast.InsertedExpr.ZFunctionCall(functionCall)
+
+  lazy val noPolluteInsertedFunc: Parsley[ast.InsertedExpr] =
+    atomic(insertedFunctionCall.map(it => it(false)))
+
   lazy val inlineInserted: Parsley[ast.InsertedExpr] =
-    atomicChoice(
-      ast.InsertedExpr.ScoreboardVariable(parsley.character.char('$') *> scoreboardResource),
-      ast.InsertedExpr.MacroVariable(parsley.character.char('%') *> lexeme.names.identifier),
-      ast.InsertedExpr.ResourceRef(unresolvedResource),
-      ast.InsertedExpr.ZBuiltinCall(builtinCall)
-    )
+    noPolluteInsertedFunc 
+    <|> ast.InsertedExpr.ScoreboardVariable(parsley.character.char('$') *> scoreboardResource)
+    <|> ast.InsertedExpr.MacroVariable(parsley.character.char('%') *> lexeme.names.identifier)
+    <|> ast.InsertedExpr.ZBuiltinCall(builtinCall)
+    <|> ast.InsertedExpr.ResourceRef(unresolvedResource)
+      
+    
 
   lazy val quotedCommand =
     lexeme(ast.Stmt.Command(parsley.character.char('`') ~> Parsley.many(quotedCommandPart) <~ parsley.character.char('`')))
 
   lazy val unquotedCommand =
-    lexeme(ast.Stmt.Command((atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail*)), parsley.character.stringOfSome(parsley.character.whitespace), Parsley.many(unquotedCommandPart)).mapN { (start, space, rest) =>
-      rest.prepended(ast.CommandPart.Literal(start + space))
-    }))
+    lexeme:
+      ast.Stmt.Command:
+        (atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail*) <~> parsley.character.stringOfSome(parsley.character.whitespace)) <~> Parsley.many(unquotedCommandPart)).map:
+          case ((start, space), rest) =>
+            rest.prepended(ast.CommandPart.Literal(start + space))
+
 
   val whileKeyword = lexeme.symbol("while")
 
-  lazy val block: Parsley[List[ast.Stmt]] = lexeme.braces(Parsley.many(atomic(stmt)))
+  lazy val block: Parsley[List[ast.Stmt]] = lexeme.braces(Parsley.many(stmt))
 
   val barSymbol = lexeme.symbol("|")
 
@@ -411,8 +430,14 @@ class Parser(val fileInfo: FileInfo):
     )
     
 
+  lazy val spawn: Parsley[ast.Delay] =
+    lexeme.symbol("spawn") ~> lexeme.parens(delay)
+
+  lazy val spawnCall: Parsley[ast.Stmt] =
+    atomic(spawn) <**> ast.Stmt.ZSpawnCall(functionCall)
+
   lazy val loop: Parsley[Option[String] => ast.Stmt] =
-    option(atomic(lexeme.symbol("spawn") ~> lexeme.parens(delay))) <**> 
+    option(atomic(spawn)) <**> 
       choice(
         forStmt,
         whileStmt
@@ -421,6 +446,12 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val forStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] =
     ast.Stmt.ZFor.curriedPos <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
+
+  lazy val forAsStmt: Parsley[ast.Stmt] =
+    ast.Stmt.ZForAs(lexeme.symbol("foras") ~> lexeme.string.fullUtf16, block)
+
+  lazy val forAtStmt: Parsley[ast.Stmt] =
+    ast.Stmt.ZForAt(lexeme.symbol("forat") ~> lexeme.string.fullUtf16, block)
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {
     ast.IfStatement(lexeme.symbol("if") ~> expr, block, option(elseStmt))
