@@ -335,16 +335,16 @@ object ast:
     case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
     object ZFor extends bridge.PosBridge5[Expr, ForRange, List[Stmt], Option[Delay], Option[String], Stmt]
 
-    case class ZForAs(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
-    object ZForAs extends bridge.PosBridge2[String, List[Stmt], Stmt]
+    //case class ZForAs(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
+    //object ZForAs extends bridge.PosBridge2[String, List[Stmt], Stmt]
 
-    case class ZForAt(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
-    object ZForAt extends bridge.PosBridge2[String, List[Stmt], Stmt]
+    //case class ZForAt(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
+    //object ZForAt extends bridge.PosBridge2[String, List[Stmt], Stmt]
 
     //case class ZExecuteFor(pos: bridge.Pos, s)
 
-    case class ZSpawnCall(pos: bridge.Pos, call: FunctionCall, delay: Delay) extends Stmt
-    object ZSpawnCall extends bridge.PosBridge2[FunctionCall, Delay, Stmt]
+    //case class ZSpawnCall(pos: bridge.Pos, call: FunctionCall, delay: Delay) extends Stmt
+    //object ZSpawnCall extends bridge.PosBridge2[FunctionCall, Delay, Stmt]
 
     case class ZReturn(pos: bridge.Pos, expr: Option[Expr]) extends Stmt
     object ZReturn extends bridge.PosBridge1[Option[Expr], Stmt]

@@ -128,7 +128,8 @@ object Parser:
   val hardOperators = Set(
     "*", "+", "-", "/", "%",
     "*=", "+=", "-=", "/=", "%=", "=",
-    "==", "!=", "<", ">", ">=", "<="
+    "==", "!=", "<", ">", ">=", "<=",
+    "~/", "~", "^"
   )
   val symbolDesc =
     SymbolDesc.plain.copy(
@@ -327,9 +328,8 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val stmt: Parsley[ast.Stmt] = {
       (quotedCommand <~ optional(lexeme.symbol.semi))
-      <|> spawnCall
-      <|> forAsStmt
-      <|> forAtStmt
+      //<|> forAsStmt
+      //<|> forAtStmt
       <|> labeledDefinition
       <|> continueStmt
       <|> breakStmt
@@ -433,8 +433,6 @@ class Parser(val fileInfo: FileInfo):
   lazy val spawn: Parsley[ast.Delay] =
     lexeme.symbol("spawn") ~> lexeme.parens(delay)
 
-  lazy val spawnCall: Parsley[ast.Stmt] =
-    atomic(spawn) <**> ast.Stmt.ZSpawnCall(functionCall)
 
   lazy val loop: Parsley[Option[String] => ast.Stmt] =
     option(atomic(spawn)) <**> 
@@ -447,11 +445,11 @@ class Parser(val fileInfo: FileInfo):
   lazy val forStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] =
     ast.Stmt.ZFor.curriedPos <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
 
-  lazy val forAsStmt: Parsley[ast.Stmt] =
-    ast.Stmt.ZForAs(lexeme.symbol("foras") ~> lexeme.string.fullUtf16, block)
+  //lazy val forAsStmt: Parsley[ast.Stmt] =
+  //  ast.Stmt.ZForAs(lexeme.symbol("foras") ~> lexeme.string.fullUtf16, block)
 
-  lazy val forAtStmt: Parsley[ast.Stmt] =
-    ast.Stmt.ZForAt(lexeme.symbol("forat") ~> lexeme.string.fullUtf16, block)
+  //lazy val forAtStmt: Parsley[ast.Stmt] =
+  //  ast.Stmt.ZForAt(lexeme.symbol("forat") ~> lexeme.string.fullUtf16, block)
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {
     ast.IfStatement(lexeme.symbol("if") ~> expr, block, option(elseStmt))
