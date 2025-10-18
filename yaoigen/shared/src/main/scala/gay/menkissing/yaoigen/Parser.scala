@@ -11,11 +11,9 @@ import parsley.errors.combinator.*
 import text.*
 import parsley.token.predicate.Basic
 import parsley.combinator.*
-import parsley.{Failure, Parsley, Success}
+import parsley.Parsley
 import parsley.Parsley.atomic
 
-import java.nio.charset.StandardCharsets
-import java.nio.file.Path
 import gay.menkissing.yaoigen.parser.ast.UnresolvedResource
 
 object Parser:
@@ -509,10 +507,11 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val decl: Parsley[ast.Decl] = {
     choice(
-      module,
+      moduleOrUse,
       fnDecl,
       freakyResource,
-      includedItems,
+      include,
+      useModule,
       config,
       ast.Decl.ZBuiltinCall(builtinCall)
     )
@@ -542,10 +541,23 @@ class Parser(val fileInfo: FileInfo):
   lazy val config: Parsley[ast.Decl] =
     ast.Decl.ZConfig(lexeme.symbol("mcmeta") ~> json.jroot)
 
+  lazy val moduleOrUse: Parsley[ast.Decl] =
+    (fileInfo.pos, lexeme.symbol("module") *> lexeme.names.identifier).tupled <**>
+      choice(
+        lexeme.braces(Parsley.many(decl)).map(decls => {case (pos, name) => ast.Decl.Module(pos, name, decls)}),
+        lexeme.symbol.semi.as { case (pos, name) => ast.Decl.UseModule(pos, name) }
+      )
+
   lazy val module:  Parsley[ast.Decl] =
     lexeme.symbol("module") *> ast.Decl.Module(lexeme.names.identifier, lexeme.braces(Parsley.many(decl)))
 
+  lazy val useModule: Parsley[ast.Decl] =
+    lexeme.symbol("use") *> lexeme.symbol("module") *> ast.Decl.UseModule(lexeme.names.identifier)
 
+  
+  lazy val include: Parsley[ast.Decl] =
+    ast.Decl.IncludedItems(lexeme.symbol("include") ~> lexeme.string.fullUtf16, Parsley.pure(List()))
+  /*
   // TODO: recursion prevention
   lazy val includedItems: Parsley[ast.Decl] =
     lexeme.symbol("include") *> lexeme.string.fullUtf16.flatMap { rel_path =>
@@ -561,7 +573,7 @@ class Parser(val fileInfo: FileInfo):
     lexer.fully(Parsley.many(newParser.decl)).parse(fileData) match
       case Success(x) => fileInfo.pos.map(p => ast.Decl.IncludedItems(p, name, x))
       case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file ${newPath.toString}:", failure.msg.toString)
-
+  */
   lazy val fnPrefixType: Parsley[ast.ReturnType] =
     choice(
       parsley.character.char('%') #> ast.ReturnType.Direct,
@@ -582,8 +594,10 @@ class Parser(val fileInfo: FileInfo):
   lazy val fnDecl: Parsley[ast.Decl] =
     lexeme.symbol("fn") *> ast.Decl.ZFunction(fnPrefixType, lexeme.names.identifier, lexeme.parens(lexeme.commaSep(fnParam)), block)
 
-  def namespace: Parsley[ast.Namespace] =
+  lazy val namespace: Parsley[ast.Namespace] =
     lexeme.symbol("namespace") *> ast.Namespace(lexeme.names.identifier, lexeme.braces(Parsley.many(decl)))
 
-  def parseAll: Parsley[List[ast.Namespace]] = lexer.fully(Parsley.many(namespace))
+  lazy val parseIncludedItems: Parsley[List[ast.Decl]] = lexer.fully(Parsley.many(decl))
+
+  lazy val parseAll: Parsley[List[ast.Namespace]] = lexer.fully(Parsley.many(namespace))
 

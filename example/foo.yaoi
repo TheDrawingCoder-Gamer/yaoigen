@@ -1,35 +1,32 @@
-module foo {
+fn hi() {
+    $a = 0
+    while $a < 10 |$a += 1| {
+    }
 
-    fn hi() {
-        $a = 0
-        while $a < 10 |$a += 1| {
-        }
-
-        xd: for $k in 1 to 10 {
-            label: for $i in 1 to 10 {
-                for $j in 1 to 10 {
-                    say pee
-                    if $j == 9 {
-                        continue :label
-                    }
-                    if $i == 5 and $j == 5 {
-                        break :label
-                    }
+    xd: for $k in 1 to 10 {
+        label: for $i in 1 to 10 {
+            for $j in 1 to 10 {
+                say pee
+                if $j == 9 {
+                    continue :label
+                }
+                if $i == 5 and $j == 5 {
+                    break :label
                 }
             }
         }
-
-        spawn(10t) for $k in 1 to 10 {
-            say hi
-        }
     }
 
-    fn %bar($a, b, %c) {
-        say %c
-        $x = b + %c
-        return $x
+    spawn(10t) for $k in 1 to 10 {
+        say hi
     }
-    fn $baz() {
-        return 1
-    }
+}
+
+fn %bar($a, b, %c) {
+    say %c
+    $x = b + %c
+    return $x
+}
+fn $baz() {
+    return 1
 }

@@ -394,8 +394,12 @@ object ast:
     case class Module(pos: bridge.Pos, name: String, items: List[Decl]) extends Decl
     object Module extends bridge.PosBridge2[String, List[Decl], Decl]
 
+    
     case class IncludedItems(pos: bridge.Pos, from: String, items: List[Decl]) extends Decl
     object IncludedItems extends bridge.PosBridge2[String, List[Decl], Decl]
+
+    case class UseModule(pos: bridge.Pos, name: String) extends Decl
+    object UseModule extends bridge.PosBridge1[String, Decl]
 
 
     case class ZFunction(pos: bridge.Pos, returnType: ReturnType, name: String, params: List[Parameter], stmts: List[Stmt]) extends Decl

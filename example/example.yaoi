@@ -6,7 +6,7 @@ namespace example {
         }
     }
 
-    include "./foo"
+    use module foo
 
     fn load() {
         say laoded

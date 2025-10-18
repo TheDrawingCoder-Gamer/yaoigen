@@ -1,6 +1,5 @@
 package gay.menkissing.yaoigen
 
-import java.nio.charset.StandardCharsets
 import parsley.*
 
 import language.experimental.saferExceptions
@@ -41,19 +40,15 @@ object Main:
     }
     run(file, force, outputIn.getOrElse("build"))
   private def run(file: String, force: Boolean, output: String): Unit =
-    val path = java.nio.file.Path.of(file)
-    val fileContent = java.nio.file.Files.readString(path, StandardCharsets.UTF_8)
-    val parser = Parser(util.FileInfo(path.toString, path.toString))
-    parser.parseAll.parse(fileContent) match
-      case Success(ast) => 
-        // println(ast)
-        println("parsed")
+    val resolver = new Resolver
+    resolver.resolveTrees(file) match
+      case Left(err) =>
+        println(err.showPretty)
+      case Right(resolved) =>
         val compiler = new Compiler
-        compiler.compile(ast, output, force) match
+        compiler.compile(resolved, output, force) match
           case Left(err) =>
             println(err.showPretty)
           case _ => ()
 
-      case Failure(v) => 
-        println(v)
 

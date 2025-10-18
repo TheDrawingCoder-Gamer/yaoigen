@@ -2,7 +2,7 @@ package gay.menkissing.yaoigen
 
 import language.experimental.saferExceptions
 
-import gay.menkissing.yaoigen.parser.ast.{ArrayKind, BinopKind, CommandPart, ElseStatement, Expr, ForRange, InsertedExpr, Parameter, ParameterKind, ReturnType, Stmt, UnaryKind}
+import gay.menkissing.yaoigen.parser.ast.{ArrayKind, BinopKind, CommandPart, ElseStatement, Expr, ForRange, InsertedExpr, ParameterKind, ReturnType, Stmt, UnaryKind}
 import util.{Location, ResourceKind, ResourceLocation, ScoreboardLocation, StorageLocation, mcdisplay, given}
 import util.MCFunctionDisplay.{mcfunc, given}
 
@@ -1434,11 +1434,7 @@ object Compiler:
   enum EvaluatedCondition:
     case Check(str: String)
     case Known(value: Boolean)
-  case class FunctionDefinition(
-                               location: ResourceLocation,
-                               arguments: List[Parameter],
-                               returnType: ReturnType
-                               )
+
 
   case class LoopContext(condition: Option[ast.Expr],
                          continueExpr: Option[ast.Expr],
@@ -1482,20 +1478,6 @@ object Compiler:
         currentBreakLabels = currentBreakLabels)
 
 
-  class Scope(val parent: Int,
-              val children: mutable.HashMap[String, mutable.ArrayDeque[Int]] = mutable.HashMap(),
-              val functionRegistry: mutable.HashMap[String, ResourceLocation] = mutable.HashMap()
-             ):
-    def addChild(name: String, child: Int): Unit =
-      children.get(name) match
-        case Some(v) => v.append(child)
-        case None => children(name) = mutable.ArrayDeque(child)
-
-    def getChild(name: String): Option[Int] =
-      children.get(name).map(_.removeHead())
-
-    override def toString: String =
-      s"Scope(parent = $parent, children = ${children.mkString("HashMap(",",",")")}, functionRegistry = ${functionRegistry.mkString("HashMap(",",",")")})"
   case class FileTree(namespaces: List[FileTree.Namespace]):
     import java.nio.file.{Files, Path}
     def generate(path: String, config: Json): Unit =
@@ -1614,7 +1596,8 @@ object Compiler:
 
 class Compiler:
   import Compiler.*
-  val scopes: mutable.ArrayBuffer[Compiler.Scope] = mutable.ArrayBuffer()
+  import Resolver.FunctionDefinition
+  var scopes: Vector[Resolver.Scope] = Vector()
   val usedScoreboards: mutable.HashMap[String, String] = mutable.HashMap()
   val constantScoreboardValues: mutable.HashSet[Int] = mutable.HashSet()
   var currentScope: Int = 0
@@ -1634,6 +1617,13 @@ class Compiler:
     def warning(err: CompileError): Unit =
       warnings.append(err)
 
+  def loadResolved(resolve: ResolveResult): Unit =
+    this.scopes = resolve.scopes
+    this.config = resolve.config
+    this.tickFunctions ++= resolve.tickFunctions
+    this.loadFunctions ++= resolve.loadFunctions
+    this.functionRegistry ++= resolve.functionRegistry.iterator
+
   def nextCounter(name: String): Int =
     if counters.contains(name) then
       counters(name) += 1
@@ -1644,12 +1634,7 @@ class Compiler:
 
   def nextFunction(funcType: String, namespace: String): ResourceLocation =
     ResourceLocation("yaoigen", List("generated", namespace, funcType, s"fn_${nextCounter(s"function:${funcType}")}"), ResourceKind.Func)
-  def pushScope(name: String, parent: Int): Int = {
-    scopes.append(Compiler.Scope(parent))
-    val index = scopes.length - 1
-    scopes(parent).addChild(name, index)
-    index
-  }
+
 
   def enterScope(name: String): Unit = {
     currentScope = scopes(currentScope).getChild(name).get
@@ -1679,66 +1664,6 @@ class Compiler:
   }
 
 
-  private object register:
-    private def registerNamespace(ns: parser.ast.Namespace, parentScope: Int): Unit throws CompileError =
-      val index = pushScope(ns.name, parentScope)
-
-      val resource = ResourceLocation(ns.name, List(), ResourceKind.Module)
-
-      ns.items.foreach: decl =>
-        registerItem(decl, resource, index)
-
-    def apply(nses: List[ast.Namespace]): Unit throws CompileError =
-      scopes.append(Compiler.Scope(0))
-      nses.foreach: ns =>
-        registerNamespace(ns, 0)
-
-    private def registerItem(item: parser.ast.Decl, location: ResourceLocation, parentScope: Int): Unit throws CompileError = {
-      import parser.ast.Decl.*
-      item match
-        case Module(_, name, items) => registerModule(name, items, location, parentScope)
-        case IncludedItems(_, _, items) => items.foreach(item => registerItem(item, location, parentScope))
-        case ZFunction(_, returnType, name, params, stmts) => registerFunction(returnType, name, params, location, parentScope)
-        case ZResource(_, _, _, _) => ()
-        case ZBuiltinCall(_, _) => ()
-        case ZConfig(pos, data) =>
-          if Compiler.this.config.isDefined then
-            throw CompileError.nonfatal(pos, "Duplicate MCMeta")
-          else
-            Compiler.this.config = Some(data)
-    }
-
-    private def registerModule(name: String, items: List[parser.ast.Decl], location: ResourceLocation, parentScope: Int): Unit throws CompileError = {
-      val index = pushScope(name, parentScope)
-      val newLoc = location.copy(modules = location.modules.appended(name))
-      items.foreach: item =>
-        registerItem(item, newLoc, index)
-    }
-
-    private def registerFunction(returnType: ReturnType, name: String, params: List[Parameter], location: ResourceLocation, parentScope: Int): Unit = {
-        val functionLocation = location.withName(name)
-        val functionPath = functionLocation.mcdisplay
-
-        if params.exists(_.kind == ParameterKind.Scoreboard) then
-          useScoreboard(ScoreboardLocation(functionLocation, "").scoreboardString)
-
-        val definition = FunctionDefinition(
-          functionLocation,
-          params,
-          returnType
-        )
-
-        addFunction(parentScope, name, location)
-
-        functionRegistry(functionLocation) = definition
-
-        if name == "tick" && location.modules.isEmpty then
-          tickFunctions.append(functionPath)
-        else if name == "load" && location.modules.isEmpty then
-          loadFunctions.append(functionPath)
-
-    }
-
   def addItem(location: ResourceLocation, item: FileTree.Item): Unit throws CompileError =
     val items = getLocation(location)
     items.foreach: i =>
@@ -1756,7 +1681,10 @@ class Compiler:
     ast match
       case func: ZFunction => compileAstFunction(func, location)
       case module: parser.ast.Decl.Module => compileModule(module, location)
-      case incl: IncludedItems => incl.items.foreach(it => compileItem(it, location))
+      case include: parser.ast.Decl.IncludedItems => 
+        include.items.foreach: item =>
+          compileItem(item, location)
+      case _: UseModule => throw InternalError(ast.pos, "shouldn't be present here")
       case resource: ZResource => compileResource(resource, location)
       case ZConfig(pos, data) => ()
       case ZBuiltinCall(pos, call) => builtins.compileDecl(pos, call, location)
@@ -2820,8 +2748,8 @@ class Compiler:
 
     addItem(ResourceLocation.module("yaoigen", List("generated", ast.name)), loadFunction)
 
-  def compileTree(ast: List[parser.ast.Namespace]): FileTree throws CompileError =
-    ast.foreach: ns =>
+  def compileTree(namespaces: List[ast.Namespace]): FileTree throws CompileError =
+    namespaces.foreach: ns =>
       compileNamespace(ns)
 
     val constantCommands = constantScoreboardValues.toList.map(constant => s"scoreboard players set $$${displayConstant(constant)} yaoigen.internal.constants $constant")
@@ -2843,18 +2771,17 @@ class Compiler:
       val tick = FileTree.Item.ZTextResource("tick", "tags/function", false, tickJson, util.Location.blank)
       addItem(location, tick)
     
-    FileTree(namespaces.values.toList)
+    FileTree(this.namespaces.values.toList)
 
-  def compile(file: List[parser.ast.Namespace], output: String, force: Boolean): Either[CompileError, Unit] =
+  def compile(resolved: ResolveResult, output: String, force: Boolean): Either[CompileError, Unit] =
     import java.nio.file.{Files, Path}
     val rootPath = Path.of(output)
     if !force && Files.exists(rootPath) && !Files.exists(rootPath.resolve("yaoi.txt")) then
       Left(CompileError.fatal(util.Location.blank, "The output directory has data in it, \nbut it's not made by yaoigen (no yaoi.txt); use --force to force"))
     else
       try
-        register(file)
-
-        val tree = compileTree(file)
+        loadResolved(resolved)
+        val tree = compileTree(resolved.resultTree)
 
         if nonFatalErrors.isEmpty then
           tree.generate(output, this.config.getOrElse(MCMeta(MCMetaPack(description = "", packFormat = 48)).asJson))
