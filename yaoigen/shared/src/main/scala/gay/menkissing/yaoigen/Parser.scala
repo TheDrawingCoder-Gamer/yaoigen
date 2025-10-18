@@ -126,7 +126,7 @@ object Parser:
     "xp"
   )
 
-  val hardKeywords = Set("or", "and", "fn", "module", "namespace", "include", "return", "if", "while", "else", "for", "continue", "break")
+  val hardKeywords = Set("or", "and", "fn", "module", "namespace", "include", "return", "if", "while", "else", "for", "continue", "break", "use")
   val hardOperators = Set(
     "*", "+", "-", "/", "%",
     "*=", "+=", "-=", "/=", "%=", "=",
@@ -216,7 +216,6 @@ class Parser(val fileInfo: FileInfo):
     }
 
     
-
   lazy val index: Parsley[ast.Expr] =
     primary <**> indexRec
     
@@ -259,9 +258,9 @@ class Parser(val fileInfo: FileInfo):
       (fileInfo.pos, lexer.nonlexeme.integer.number).tupled <**>
       // TODO: someway to error out here if we truncate?
         choice(
-          (parsley.character.satisfy(_.toLower == 'b') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZByte(pos, i.toByte)),
-          (parsley.character.satisfy(_.toLower == 's') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZShort(pos, i.toShort)),
-          (parsley.character.satisfy(_.toLower == 'i') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZInt(pos, i.toInt)),
+          (parsley.character.satisfy(_.toLower == 'b') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZByte(pos, i.toByte)),
+          (parsley.character.satisfy(_.toLower == 's') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZShort(pos, i.toShort)),
+          (parsley.character.satisfy(_.toLower == 'i') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZInt(pos, i.toInt)),
           (parsley.character.satisfy(_.toLower == 'l') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZLong(pos, i.toLong)),
           (parsley.character.satisfy(_.toLower == 'f') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZFloat(pos, i.toFloat)),
           (parsley.character.satisfy(_.toLower == 'd') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZDouble(pos, i.toDouble)),
@@ -270,44 +269,40 @@ class Parser(val fileInfo: FileInfo):
 
 
   lazy val arrayKind: Parsley[ast.ArrayKind] =
-    atomicChoice(
-      (lexeme.symbol("I") *> lexeme.symbol.semi) *> Parsley.pure(ast.ArrayKind.Int),
-      (lexeme.symbol("L") *> lexeme.symbol.semi) *> Parsley.pure(ast.ArrayKind.Long),
-      (lexeme.symbol("B") *> lexeme.symbol.semi) *> Parsley.pure(ast.ArrayKind.Byte),
-      Parsley.pure(ast.ArrayKind.Any)
-
-    )
+    (lexeme.symbol("I") *> lexeme.symbol.semi).as(ast.ArrayKind.Int)
+    <|> (lexeme.symbol("L") *> lexeme.symbol.semi).as(ast.ArrayKind.Long)
+    <|> (lexeme.symbol("B") *> lexeme.symbol.semi).as(ast.ArrayKind.Byte)
+    </> ast.ArrayKind.Any
   lazy val list: Parsley[ast.Expr] = {
     lexeme.brackets(ast.Expr.ZList(arrayKind, lexeme.commaSep(expr)))
   }
 
   lazy val compound: Parsley[ast.Expr] = {
-    lexeme.braces(ast.Expr.ZCompound(lexeme.commaSep(compoundKeyValue).map(_.toMap)))
+    // #{ in case we ever need to do compounds in builtins
+    (lexeme.symbol.openBrace <|> lexeme.symbol("#{")) *> ast.Expr.ZCompound(lexeme.commaSep(compoundKeyValue).map(_.toMap) <* optional(lexeme.symbol.comma)) <* lexeme.symbol.closingBrace
   }
 
   lazy val compoundKeyValue: Parsley[(String,ast.Expr)] = {
-    (choice(
-      atomic(lexeme.names.identifier),
-      lexeme.string.fullUtf16
-    ) <* lexeme.symbol.colon) <~> expr
+    ((lexeme.string.fullUtf16 <|> lexeme.names.identifier) <* lexeme.symbol.colon) <~> expr
   }
 
   lazy val modulePath =
     Parsley.many(atomic(nonlexeme.names.identifier <* nonlexeme.symbol("/")))
 
   lazy val namespaceString: Parsley[String] =
+    // TODO: way to remove atomic here?
     atomic(option(atomic(nonlexeme.names.identifier)).map(_.getOrElse("")) <~ nonlexeme.symbol.colon)
     <|> nonlexeme.symbol("~/").as("~")
 
 
   lazy val unresolvedResourcePath: Parsley[(List[String], String)] =
-    modulePath <~> nonlexeme.names.identifier
+    sepBy1(nonlexeme.names.identifier, nonlexeme.symbol("/")).map(ls => (ls.init, ls.last))
 
   lazy val unresolvedResource: Parsley[ast.UnresolvedResource] =
-    lexeme(
+    lexeme:
       (option(namespaceString), unresolvedResourcePath).mapN { case (a, (b, c)) =>
         ast.UnresolvedResource(a, b, c)
-      })
+      }
 
   val notBracketString =
     parsley.character.stringOfMany(it => !"[]".contains(it))
@@ -364,16 +359,14 @@ class Parser(val fileInfo: FileInfo):
   }
 
   lazy val stmt: Parsley[ast.Stmt] = {
-      (quotedCommand <~ optional(lexeme.symbol.semi))
-      //<|> forAsStmt
-      //<|> forAtStmt
+      (quotedCommand <* optional(lexeme.symbol.semi))
       <|> labeledDefinition
       <|> continueStmt
       <|> breakStmt
       <|> ast.Stmt.ZIf(ifStmt)
-      <|> (returnStmt <~ optional(lexeme.symbol.semi))
+      <|> (returnStmt <* optional(lexeme.symbol.semi))
       <|> unquotedCommand
-      <|> (evalExpr <~ optional(lexeme.symbol.semi))
+      <|> (evalExpr <* optional(lexeme.symbol.semi))
   }
   
   lazy val continueStmt: Parsley[ast.Stmt] =
@@ -382,8 +375,9 @@ class Parser(val fileInfo: FileInfo):
   lazy val breakStmt: Parsley[ast.Stmt] =
     ast.Stmt.ZBreak(lexeme.symbol("break") ~> option(labelReference)) <~ optional(lexeme.symbol.semi)
 
+  // TODO: weed out atomic here
   def commandPartShared(invalidCharacters: String): Parsley[ast.CommandPart] =
-    atomic(ast.CommandPart.Inserted(nonlexeme.symbol("&!") ~> ast.InsertedExpr.ZBlock(option(nonlexeme.symbol("!")).map(_.nonEmpty), lexeme.symbol.openBrace ~> Parsley.many(atomic(stmt)) <~ nonlexeme.symbol("}"))))
+    atomic(ast.CommandPart.Inserted(nonlexeme.symbol("&!") ~> ast.InsertedExpr.ZBlock(option(nonlexeme.symbol("!")).map(_.nonEmpty), lexeme.symbol.openBrace ~> Parsley.many(stmt) <~ nonlexeme.symbol("}"))))
     <|> atomic(ast.CommandPart.Inserted(nonlexeme.symbol("%") ~> ast.InsertedExpr.MacroVariable(nonlexeme.names.identifier)))
     <|> ast.CommandPart.Inserted(lexeme.symbol("&@{") ~> insertedFunctionCall.map(_(true)) <~ nonlexeme.symbol("}"))
     <|> (atomic(lexeme.symbol("&{")) ~> ast.CommandPart.Inserted(inlineInserted <~ nonlexeme.symbol("}")))
@@ -403,15 +397,19 @@ class Parser(val fileInfo: FileInfo):
   lazy val insertedFunctionCall: Parsley[Boolean => ast.InsertedExpr.ZFunctionCall] =
     ast.InsertedExpr.ZFunctionCall(functionCall)
 
-  lazy val noPolluteInsertedFunc: Parsley[ast.InsertedExpr] =
-    atomic(insertedFunctionCall.map(it => it(false)))
+
+  lazy val resourceRefOrCall: Parsley[ast.InsertedExpr] =
+    (fileInfo.pos, unresolvedResource).tupled <**>
+      choice(
+        functionArguments.map(args => {case (pos, res) => ast.InsertedExpr.ZFunctionCall(pos, ast.FunctionCall(res, args), false)}),
+        Parsley.pure { case (pos, res) => ast.InsertedExpr.ResourceRef(pos, res) }
+      )
 
   lazy val inlineInserted: Parsley[ast.InsertedExpr] =
-    noPolluteInsertedFunc 
-    <|> ast.InsertedExpr.ScoreboardVariable(parsley.character.char('$') *> scoreboardResource)
+    ast.InsertedExpr.ScoreboardVariable(parsley.character.char('$') *> scoreboardResource)
     <|> ast.InsertedExpr.MacroVariable(parsley.character.char('%') *> lexeme.names.identifier)
     <|> ast.InsertedExpr.ZBuiltinCall(builtinCall)
-    <|> ast.InsertedExpr.ResourceRef(unresolvedResource)
+    <|> resourceRefOrCall
       
     
 
@@ -421,6 +419,7 @@ class Parser(val fileInfo: FileInfo):
   lazy val unquotedCommand =
     lexeme:
       ast.Stmt.Command:
+        // OK I think the atomic here is justified
         (atomic(parsley.character.strings(Parser.commands.head, Parser.commands.tail*) <~> parsley.character.stringOfSome(parsley.character.whitespace)) <~> Parsley.many(unquotedCommandPart)).map:
           case ((start, space), rest) =>
             rest.prepended(ast.CommandPart.Literal(start + space))
@@ -444,8 +443,12 @@ class Parser(val fileInfo: FileInfo):
   }
 
   lazy val forRange: Parsley[ast.ForRange] =
-    atomic(ast.ForRange.Range(expr, (lexeme.symbol("until") #> false) <|> (lexeme.symbol("to") #> true), expr))
-    <|> ast.ForRange.Single(expr)
+    expr <**>
+      choice(
+        (lexeme.symbol("until").as(false) <|> lexeme.symbol("to").as(true), expr).mapN((inclusive, max) => min => ast.ForRange.Range(min, inclusive, max)),
+        Parsley.pure(ast.ForRange.Single.apply)
+      )
+
 
 
   lazy val labeledDefinition: Parsley[ast.Stmt] =
@@ -460,33 +463,26 @@ class Parser(val fileInfo: FileInfo):
         choice(
           lexeme.symbol("d") #> ast.TimeType.Day,
           lexeme.symbol("s") #> ast.TimeType.Seconds,
-          lexeme.symbol("t") #> ast.TimeType.Ticks,
-          Parsley.pure(ast.TimeType.Ticks)
-        )
+          lexeme.symbol("t") #> ast.TimeType.Ticks
+        ) </> ast.TimeType.Ticks
       )
     )
     
 
   lazy val spawn: Parsley[ast.Delay] =
+    // TODO: stupid no good spawn NOT being a keyword causes jank...
+    // but it being a keyword ALSO causes jank
     lexeme.symbol("spawn") ~> lexeme.parens(delay)
 
 
   lazy val loop: Parsley[Option[String] => ast.Stmt] =
     option(atomic(spawn)) <**> 
-      choice(
-        forStmt,
-        whileStmt
-      )
+      (forStmt <|> whileStmt)
 
 
   lazy val forStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] =
     ast.Stmt.ZFor.curriedPos <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
 
-  //lazy val forAsStmt: Parsley[ast.Stmt] =
-  //  ast.Stmt.ZForAs(lexeme.symbol("foras") ~> lexeme.string.fullUtf16, block)
-
-  //lazy val forAtStmt: Parsley[ast.Stmt] =
-  //  ast.Stmt.ZForAt(lexeme.symbol("forat") ~> lexeme.string.fullUtf16, block)
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {
     ast.IfStatement(lexeme.symbol("if") ~> expr, block, option(elseStmt))
@@ -494,7 +490,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val elseStmt: Parsley[ast.ElseStatement] = {
     lexeme.symbol("else") *> choice(
-      atomic(ast.ElseStatement.EIfStatement(ifStmt)),
+      ast.ElseStatement.EIfStatement(ifStmt),
       ast.ElseStatement.Block(lexeme.braces(Parsley.many(stmt)))
     )
   }
@@ -524,7 +520,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val resourcePath: Parsley[String] =
     choice(
-      //lexeme.symbol.dot.as("."),
+      lexeme.symbol.dot.as("."),
       (modulePath.map(it => if it.isEmpty then "" else it.mkString("", "/", "/")) <~> lexeme.names.identifier).map(_ + _)
     )
 
@@ -574,12 +570,10 @@ class Parser(val fileInfo: FileInfo):
     )
 
   lazy val fnParamKind: Parsley[ast.ParameterKind] =
-    choice(
-      parsley.character.char('%') #> ast.ParameterKind.Macro,
-      parsley.character.char('$') #> ast.ParameterKind.Scoreboard,
-      parsley.character.char('&') #> ast.ParameterKind.CompileTime,
-      Parsley.pure(ast.ParameterKind.Storage)
-    )
+    parsley.character.char('%').as(ast.ParameterKind.Macro)
+    <|> parsley.character.char('$').as(ast.ParameterKind.Scoreboard)
+    <|> parsley.character.char('&').as(ast.ParameterKind.CompileTime)
+    </> ast.ParameterKind.Storage
 
   lazy val fnParam: Parsley[ast.Parameter] =
     ast.Parameter(fnParamKind, lexeme.names.identifier, option(lexeme.symbol("=") *> expr))

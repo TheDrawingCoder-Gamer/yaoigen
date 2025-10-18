@@ -24,6 +24,7 @@ object ast:
       final def <#(op: Parsley[?])(using f: FileInfo): Parsley[A] = f.pos.map(this.con) <~ op
 
       def make(using f: FileInfo): Parsley[A] = f.pos.map(this.con)
+      
 
     trait PosBridge0[+Z] extends PosSingleton[Z]:
       def apply(pos: Pos): Z
@@ -80,7 +81,7 @@ object ast:
         f.pos <**> (a, b, c, d, e).mapN((a, b, c, d, e) => this.apply(_, a, b, c, d, e))
 
       def curriedPos(using f: FileInfo): Parsley[A => B => C => D => E => Z] =
-        f.pos.map(pos => a => b => c => d => e => this.apply(pos, a, b, c, d, e))
+        this.make.map(_.curried)
 
 
 
