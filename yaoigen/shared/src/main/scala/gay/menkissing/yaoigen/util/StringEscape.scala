@@ -10,7 +10,7 @@ object StringEscape:
       case '\"' => "\\\""
       case '\\' => "\\\\"
       case x =>
-        if x >= 0x20 && x <= 0x73 then
+        if x >= 0x20 && x <= 0x7E then
           String.valueOf(Character.toChars(x))
         else
           val nStr = x.toHexString

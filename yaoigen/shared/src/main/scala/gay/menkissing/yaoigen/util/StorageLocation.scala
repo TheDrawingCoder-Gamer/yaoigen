@@ -11,7 +11,11 @@ object StorageLocation:
   def resolveResource(fnLoc: ResourceLocation, resource: UnresolvedResource): StorageLocation =
     fromFnLoc(ResourceLocation.resolveResource(fnLoc, resource))
 
-case class StorageLocation(storage: ResourceLocation, name: String)
+case class StorageLocation(storage: ResourceLocation, name: String):
+  def subPath(sub: String): StorageLocation =
+    copy(name = PathHelper.subPath(name, sub))
+  def index(n: Int): StorageLocation =
+    copy(name = PathHelper.index(name, n))
     
 given MCFunctionDisplay[StorageLocation] = a =>
   mcfunc"${a.storage} ${a.name}"

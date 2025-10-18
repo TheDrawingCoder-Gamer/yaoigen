@@ -189,6 +189,14 @@ object ast:
       override val executorSensitive: Boolean = true
     object ZFunctionCall extends bridge.PosBridge1[FunctionCall, Expr]
 
+    case class ZMember(pos: bridge.Pos, name: String, expr: Expr) extends Expr:
+      override val executorSensitive: Boolean = expr.executorSensitive
+    object ZMember extends bridge.PosBridge2[String, Expr, Expr]
+
+    case class ZIndex(pos: bridge.Pos, index: Expr, expr: Expr) extends Expr:
+      override val executorSensitive: Boolean = expr.executorSensitive || index.executorSensitive
+    object ZIndex extends bridge.PosBridge2[Expr, Expr, Expr]
+
     case class Atom(pos: bridge.Pos, expr: Expr) extends Expr:
       override val executorSensitive: Boolean = expr.executorSensitive
     object Atom extends bridge.PosBridge1[Expr, Expr]

@@ -9,7 +9,6 @@ import util.MCFunctionDisplay.{mcfunc, given}
 import java.util.Comparator
 import scala.collection.mutable
 import scala.util.Using
-import scala.annotation.nowarn
 import cats.implicits.*
 import cats.*
 import gay.menkissing.yaoigen.Compiler.FileTree.Item
@@ -22,6 +21,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor, Files}
 import gay.menkissing.yaoigen.util.MCFunctionDisplay
 import gay.menkissing.yaoigen.parser.ast.BuiltinArg
+import gay.menkissing.yaoigen.util.PathHelper
 
 
 
@@ -104,6 +104,10 @@ object Compiler:
     case Block
     case Transparent
 
+  enum AssignTarget:
+    case Scoreboard(loc: ScoreboardLocation)
+    case Data(kind: DataKind)
+
   case class NestedInfo(kind: NestKind, parent: Option[NestedInfo], actualLocation: ResourceLocation, label: Option[String]):
     def currentLoopContext: Option[LoopContext] =
       kind match
@@ -149,6 +153,28 @@ object Compiler:
                 (it, n)
           
 
+  enum DataKind:
+    case Storage(storage: StorageLocation)
+    case Entity(selector: String, path: String)
+    case Block(pos: (BlockCoord, BlockCoord, BlockCoord), path: String)
+
+    def editPath(f: String => String): DataKind =
+      this match
+        case Storage(loc) => DataKind.Storage(loc.copy(name = f(loc.name)))
+        case Entity(selector, path) => DataKind.Entity(selector, f(path))
+        case Block(pos, path) => DataKind.Block(pos, f(path))
+
+    def subPath(x: String): DataKind =
+      editPath(path => util.PathHelper.subPath(path, x))
+    def index(i: Int): DataKind = editPath(path => s"$path[$i]")
+
+
+
+  given MCFunctionDisplay[DataKind] =
+    case DataKind.Storage(storage) => mcfunc"storage $storage"
+    case DataKind.Entity(selector, path) => s"entity $selector $path"
+    case DataKind.Block((x, y, z), path) => mcfunc"block $x $y $z $path"
+
   enum StorageKind:
     case Modify, MacroModify
     case Store, MacroStore
@@ -158,6 +184,45 @@ object Compiler:
       Expression(at, false, ExpressionKind.EVoid)
 
   case class Expression(location: util.Location, needsMacro: Boolean, kind: ExpressionKind):
+    def index(indexPos: util.Location, idx: Int): Expression throws CompileError =
+      kind match
+        case ExpressionKind.EStorage(path) => copy(location = indexPos, kind = ExpressionKind.EStorage(path.copy(name = s"${path.name}[$idx]")))
+        case ExpressionKind.EEntity(selector, path) => copy(location = indexPos, kind = ExpressionKind.EEntity(selector, s"$path[$idx]"))
+        case ExpressionKind.EBlock(pos, path) => copy(location = indexPos, kind = ExpressionKind.EBlock(pos, s"$path[$idx]"))
+        case ExpressionKind.EArray(values, _) =>
+          if idx >= values.length then
+            throw CompileError.nonfatal(indexPos, "Index out of range")
+          else
+            values(idx)
+        case ExpressionKind.EByteArray(values) =>
+          if idx >= values.length then
+            throw CompileError.nonfatal(indexPos, "Index out of range")
+          else
+            values(idx)
+        case ExpressionKind.EIntArray(values) =>
+          if idx >= values.length then
+            throw CompileError.nonfatal(indexPos, "Index out of range")
+          else
+            values(idx)
+        case ExpressionKind.ELongArray(values) =>
+          if idx >= values.length then
+            throw CompileError.nonfatal(indexPos, "Index out of range")
+          else
+            values(idx)
+        case _ =>
+          throw CompileError.nonfatal(indexPos, "This expression can't be indexed")
+    def subPath(indexPos: util.Location, name: String): Expression throws CompileError =
+      kind match
+        case ExpressionKind.EStorage(path) => copy(location = indexPos, kind = ExpressionKind.EStorage(path.copy(name = PathHelper.subPath(path.name, name))))
+        case ExpressionKind.EEntity(selector, path) => copy(location = indexPos, kind = ExpressionKind.EEntity(selector, PathHelper.subPath(path, name)))
+        case ExpressionKind.EBlock(pos, path) => copy(location = indexPos, kind = ExpressionKind.EBlock(pos, PathHelper.subPath(path, name)))
+        case ExpressionKind.ECompound(kvs) =>
+          kvs.get(name) match
+            case Some(value) => value
+            case _ =>
+              throw CompileError.nonfatal(indexPos, s"No such key '$name'")
+        case _ =>
+          throw CompileError.nonfatal(indexPos, "This expression can't be indexed")
     def valueEqual(that: Expression): Option[Boolean] =
       (this.kind, that.kind) match
         case (ExpressionKind.EVoid, ExpressionKind.EVoid) => Some(true)
@@ -194,13 +259,17 @@ object Compiler:
              | (ExpressionKind.EScoreboard(_), _)
              | (_, ExpressionKind.EScoreboard(_))
              | (ExpressionKind.ECondition(_), _)
-             | (_, ExpressionKind.ECondition(_)) => None
+             | (_, ExpressionKind.ECondition(_))
+             | (ExpressionKind.EEntity(_, _), _)
+             | (_, ExpressionKind.EEntity(_, _))
+             | (ExpressionKind.EBlock(_, _), _)
+             | (_, ExpressionKind.EBlock(_, _)) => None
         case _ => Some(false)
 
-    def toStorage(compiler: Compiler, code: mutable.ArrayBuffer[String], storage: StorageLocation, operation: String, dataType: NbtType): Unit throws CompileError =
+    def toData(compiler: Compiler, code: mutable.ArrayBuffer[String], data: DataKind, operation: String, dataType: NbtType, namespace: String): Unit throws CompileError =
       kind.toComptimeString(false) match
         case Some(v) =>
-          code.append(mcfunc"data modify storage ${storage} ${operation} value ${v}")
+          code.append(mcfunc"data modify $data ${operation} value ${v}")
         case None => 
           val (conversionCode, kind2) =
             kind match
@@ -213,13 +282,17 @@ object Compiler:
                   | ExpressionKind.EDouble(_)
                   | ExpressionKind.EBoolean(_)
                   | ExpressionKind.EString(_) => throw InternalError(location, "INTERNAL ERROR: This value should have a compile time string representation")
-              case ExpressionKind.EArray(values, nbtType) => return arrayToStorage(values, "", compiler, code, storage, nbtType)
-              case ExpressionKind.EByteArray(values) => return arrayToStorage(values, "B; ", compiler, code, storage, NbtType.Byte)
-              case ExpressionKind.EIntArray(values) => return arrayToStorage(values, "I; ", compiler, code, storage, NbtType.Int)
-              case ExpressionKind.ELongArray(values) => return arrayToStorage(values, "L; ", compiler, code, storage, NbtType.Long)
-              case ExpressionKind.ECompound(values) => return compoundToStorage(values, compiler, code, storage)
+              case ExpressionKind.EArray(values, nbtType) => return arrayToStorage(values, "", compiler, code, data, nbtType, namespace)
+              case ExpressionKind.EByteArray(values) => return arrayToStorage(values, "B; ", compiler, code, data, NbtType.Byte, namespace)
+              case ExpressionKind.EIntArray(values) => return arrayToStorage(values, "I; ", compiler, code, data, NbtType.Int, namespace)
+              case ExpressionKind.ELongArray(values) => return arrayToStorage(values, "L; ", compiler, code, data, NbtType.Long, namespace)
+              case ExpressionKind.ECompound(values) => return compoundToStorage(values, compiler, code, data, namespace)
               case ExpressionKind.EStorage(loc) =>
                 (mcfunc"from storage ${loc}", StorageKind.Modify)
+              case ExpressionKind.EEntity(selector, path) =>
+                (s"from entity $selector $path", StorageKind.Modify)
+              case ExpressionKind.EBlock((x, y, z), path) =>
+                (mcfunc"from block $x $y $z $path", StorageKind.Modify)
               case ExpressionKind.ESubString(loc, start, end) =>
                 (mcfunc"string storage ${loc} ${start}${if end.nonEmpty then " " + end.get.toString else ""}", StorageKind.Modify)
               case ExpressionKind.EScoreboard(loc) =>
@@ -227,7 +300,7 @@ object Compiler:
               case ExpressionKind.EMacro(loc) =>
                 (mcfunc"value $$(${loc.name})", StorageKind.MacroModify)
               case ExpressionKind.ECondition(cond) =>
-                cond.compile(compiler, code, storage.storage.namespace, false) match
+                cond.compile(compiler, code, namespace, false) match
                   case EvaluatedCondition.Check(c) =>
                     (s"execute ${c}", StorageKind.Store)
                   case EvaluatedCondition.Known(v) =>
@@ -241,31 +314,34 @@ object Compiler:
           val storeType = dataType.storeString.getOrElse("int")
           kind3 match
             case StorageKind.Modify =>
-              code.append(mcfunc"data modify storage ${storage} ${operation} ${conversionCode}")
+              code.append(mcfunc"data modify $data ${operation} ${conversionCode}")
             case StorageKind.MacroModify =>
-              code.append(mcfunc"$$data modify storage ${storage} ${operation} ${conversionCode}")
+              code.append(mcfunc"$$data modify $data ${operation} ${conversionCode}")
             case StorageKind.Store =>
               if operation == "set" then
-                code.append(mcfunc"execute store result storage ${storage} ${storeType} 1 run ${conversionCode}")
+                code.append(mcfunc"execute store result $data ${storeType} 1 run ${conversionCode}")
               else
-                val tempStorage = compiler.nextStorage(storage.storage.namespace)
+                val tempStorage = compiler.nextStorage(namespace)
                 code.append(
                   mcfunc"execute store result storage ${tempStorage} ${storeType} 1 run ${conversionCode}"
                 )
                 code.append(
-                  mcfunc"data modify storage ${storage} ${operation} from storage ${tempStorage}"
+                  mcfunc"data modify $data ${operation} from storage ${tempStorage}"
                 )
             case StorageKind.MacroStore =>
               if operation == "set" then
-                code.append(mcfunc"$$execute store result storage ${storage} ${storeType} 1 run ${conversionCode}")
+                code.append(mcfunc"$$execute store result $data ${storeType} 1 run ${conversionCode}")
               else
-                val tempStorage = compiler.nextStorage(storage.storage.namespace)
+                val tempStorage = compiler.nextStorage(namespace)
                 code.append(
                   mcfunc"$$execute store result storage ${tempStorage} ${storeType} 1 run ${conversionCode}"
                 )
                 code.append(
-                  mcfunc"data modify storage ${storage} ${operation} from storage ${tempStorage}"
+                  mcfunc"data modify storage $data ${operation} from storage ${tempStorage}"
                 )
+
+    def toStorage(compiler: Compiler, code: mutable.ArrayBuffer[String], storage: StorageLocation, operation: String, dataType: NbtType): Unit throws CompileError =
+      toData(compiler, code, DataKind.Storage(storage), operation, dataType, storage.storage.namespace)
         
 
 
@@ -314,6 +390,8 @@ object Compiler:
         case ExpressionKind.ELongArray(_) => throw CompileError.nonfatal(location, "Cannot assign array to scoreboard")
         case ExpressionKind.ECompound(_) => throw CompileError.nonfatal(location, "Cannot assign compound to scoreboard")
         case ExpressionKind.EStorage(loc) => (mcfunc"data get storage $loc", ScoreKind.Indirect)
+        case ExpressionKind.EEntity(selector, path) => (s"data get entity $selector $path", ScoreKind.Indirect)
+        case ExpressionKind.EBlock((x, y, z), path) => (mcfunc"data get block $x $y $z $path", ScoreKind.Indirect)
         case ExpressionKind.EScoreboard(loc) => (mcfunc"= $loc", ScoreKind.Direct("operation"))
         case ExpressionKind.EMacro(loc) => (s"$$(${loc.name})", ScoreKind.DirectMacro("set"))
         case ExpressionKind.ECondition(cond) =>
@@ -338,7 +416,7 @@ object Compiler:
         case ExpressionKind.EIntArray(_) => throw CompileError.nonfatal(location, "Can't use array as condition")
         case ExpressionKind.ELongArray(_) => throw CompileError.nonfatal(location, "Can't use array as condition")
         case ExpressionKind.ECompound(_) => throw CompileError.nonfatal(location, "Can't use compound as condition")
-        case ExpressionKind.EStorage(_) | ExpressionKind.EMacro(_) =>
+        case ExpressionKind.EStorage(_) | ExpressionKind.EMacro(_) | ExpressionKind.EEntity(_, _) | ExpressionKind.EBlock(_, _) =>
           val scoreboard = compiler.copyToScoreboard(code, this, namespace)
           Condition.Truthy(scoreboard)
         case ExpressionKind.ESubString(_, _, _) => throw CompileError.nonfatal(location, "Can't use string as condition")
@@ -425,8 +503,9 @@ object Compiler:
     prefix: String,
     compiler: Compiler,
     code: mutable.ArrayBuffer[String],
-    storage: StorageLocation,
-    dataType: NbtType
+    data: DataKind,
+    dataType: NbtType,
+    namespace: String,
   ): Unit throws CompileError =
     val constantElements = mutable.ArrayBuffer[String]()
     val computedElementsCode = mutable.ArrayBuffer[String]()
@@ -435,16 +514,17 @@ object Compiler:
         case Some(value) =>
           constantElements.append(value)
         case _ =>
-          expr.toStorage(compiler, code, storage, s"insert $i", dataType)
+          expr.toData(compiler, code, data, s"insert $i", dataType, namespace)
     // TODO: sus
-    code.append(mcfunc"data modify storage $storage set value [${prefix}${constantElements.mkString(", ")}]")
+    code.append(mcfunc"data modify $data set value [${prefix}${constantElements.mkString(", ")}]")
     code.appendAll(computedElementsCode)
 
   private def compoundToStorage(
     elements: Map[String, Expression],
     compiler: Compiler,
     code: mutable.ArrayBuffer[String],
-    storage: StorageLocation,
+    data: DataKind,
+    namespace: String
   ): Unit throws CompileError =
     val constantElements = mutable.ArrayBuffer[String]()
     val computedElementsCode = mutable.ArrayBuffer[String]()
@@ -454,17 +534,17 @@ object Compiler:
         case Some(value) =>
           constantElements.append(s"$key: $value")
         case _ =>
-          val elementLocation = storage.copy(name = s"${storage.name}.$key")
-
-          value.toStorage(
+          val elementLocation = data.subPath(key)
+          value.toData(
             compiler,
             computedElementsCode,
             elementLocation,
             "set",
-            NbtType.Unknown
+            NbtType.Unknown,
+            namespace
           )
     code.append(
-      mcfunc"data modify storage $storage set value {${constantElements.mkString(", ")}}"
+      mcfunc"data modify $data set value {${constantElements.mkString(", ")}}"
     )
     code.appendAll(computedElementsCode)
 
@@ -484,33 +564,13 @@ object Compiler:
     case ELongArray(values: List[Expression])
     case ECompound(values: Map[String, Expression])
     case EStorage(loc: StorageLocation)
+    case EEntity(selector: String, path: String)
+    case EBlock(pos: (BlockCoord, BlockCoord, BlockCoord), path: String)
     case ESubString(loc: StorageLocation, start: Int, end: Option[Int])
     case EScoreboard(loc: ScoreboardLocation)
     case EMacro(loc: StorageLocation)
     case ECondition(cond: Compiler.Condition)
 
-    def executorSensitive: Boolean =
-      this match
-        case EVoid => false
-        case EByte(_) => false
-        case EShort(_) => false
-        case EInteger(_) => false
-        case ELong(_) => false
-        case EFloat(_) => false
-        case EDouble(_) => false
-        case EBoolean(_) => false
-        case EString(_) => false
-        case EArray(values, _) => values.exists(_.kind.executorSensitive)
-        case EByteArray(values) => values.exists(_.kind.executorSensitive)
-        case EIntArray(values) => values.exists(_.kind.executorSensitive)
-        case ELongArray(values) => values.exists(_.kind.executorSensitive)
-        case ECompound(values) => values.values.exists(_.kind.executorSensitive)
-        case EStorage(loc) => false
-        case ESubString(loc, start, end) => false
-        case EScoreboard(loc) =>
-          !loc.name.contains("@")
-        case EMacro(loc) => false
-        case ECondition(cond) => true
       
 
     def nbtType: NbtType =
@@ -530,6 +590,8 @@ object Compiler:
         case ExpressionKind.ELongArray(_) => NbtType.LongArray
         case ExpressionKind.ECompound(_) => NbtType.Compound
         case ExpressionKind.EStorage(_) => NbtType.Unknown
+        case ExpressionKind.EEntity(_, _) => NbtType.Unknown
+        case ExpressionKind.EBlock(_, _) => NbtType.Unknown
         case ExpressionKind.ESubString(_, _, _) => NbtType.String
         case ExpressionKind.EScoreboard(_) => NbtType.Numeric
         case ExpressionKind.EMacro(_) => NbtType.Unknown
@@ -566,13 +628,20 @@ object Compiler:
         case ExpressionKind.ELongArray(values) => arrayToString(values, "L; ")
         case ExpressionKind.ECompound(values) =>
           values.toList.traverse: (key, value) =>
-            value.kind.toComptimeString(false).map(it => s"$key: $it")
+            value.kind.toComptimeString(false).map: it => 
+              if !key.head.isDigit && key.forall(c => c.isLetterOrDigit || c == '_') then
+                s"$key: $it"
+              else
+                val esc = util.StringEscape.escaped(key)
+                s"\"$esc\": $it"
           .map: valueStrings =>
             valueStrings.mkString("{", ", ", "}")
         case ExpressionKind.EStorage(loc) =>
           if topLevel then
             Some(loc.mcdisplay)
           else None
+        case ExpressionKind.EEntity(selector, path) => None
+        case ExpressionKind.EBlock(pos, path) => None
         case ExpressionKind.ESubString(loc, start, end) => None
         case ExpressionKind.EScoreboard(loc) =>
           if topLevel then
@@ -593,9 +662,138 @@ object Compiler:
         case PositionMode.Relative => "~"
         case PositionMode.Caret => "^"
  
+  object exprUnapply:
+    // TODO: selector?
+    object Identifier:
+      def unapply(it: ast.Expr): Option[String] =
+        it match
+          case Expr.ZVariable(_, path) if path.namespace.isEmpty && path.modules.isEmpty => Some(path.name)
+          case _ => None
+    object ResourcePath:
+      def unapply(it: ast.Expr)(using context: FuncContext): Option[ResourceLocation] =
+        it match
+          case Expr.ZVariable(_, path) =>
+            Some(ResourceLocation.resolveResource(context.location, path))
+          case _ => None
+    object ScoreboardPath:
+      def unapply(it: ast.Expr)(using context: FuncContext): Option[ScoreboardLocation] =
+        it match
+          case Expr.ZScoreboardVariable(_, path) =>
+            Some(ScoreboardLocation.resolveResource(context.location, path))
+          case _ => None
+    object StoragePath:
+      // can't believe this shit actually works
+      // This one is used in the main compiler, so any additions here will match
+      def unapply(it: ast.Expr)(using context: FuncContext): Option[(util.Location, StorageLocation)] =
+        it match
+          case Expr.ZVariable(pos, path) =>
+            Some((pos, StorageLocation.resolveResource(context.location, path)))
+          case Expr.ZBuiltinCall(pos, ast.BuiltinCall("storage", StoragePath(storage))) =>
+            Some((pos, storage))
+          case _ => None
+      def unapply(it: List[BuiltinArg])(using context: FuncContext): Option[StorageLocation] =
+        it match
+          case List(BuiltinArg.BExpr(_, ResourcePath(path)), BuiltinArg.BExpr(_, Expr.ZString(_, nbtPath))) =>
+            Some(StorageLocation(path, nbtPath))
+          case List(BuiltinArg.BExpr(_, ResourcePath(path))) =>
+            Some(StorageLocation(path, ""))
+          case _ => None
+
+    object EntityStorage:
+      def unapply(it: ast.Expr): Option[(util.Location, String, String)] =
+        it match
+          case Expr.ZBuiltinCall(pos, ast.BuiltinCall("entity", args)) =>
+            args match
+              case EntityStorage(selector, path) =>
+                Some((pos, selector, path))
+              case _ => None
+          case _ => None
+      def unapply(args: List[BuiltinArg]): Option[(String, String)] =
+        args match
+          case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector)), BuiltinArg.BExpr(_, Expr.ZString(_, path))) =>
+            Some((selector, path))
+          case List(BuiltinArg.BExpr(_, Expr.ZString(_, selector))) =>
+            Some((selector, ""))
+          case _ => None
+    object BlockEntityStorage:
+      def unapply(it: ast.Expr): Option[(util.Location, (BlockCoord, BlockCoord, BlockCoord), String)] =
+        it match
+          case Expr.ZBuiltinCall(pos, ast.BuiltinCall("block_entity", BlockEntityStorage(blockPos, path))) =>
+            Some((pos, blockPos, path))
+          case _ => None
+
+      def unapply(args: List[BuiltinArg]): Option[((BlockCoord, BlockCoord, BlockCoord), String)] =
+        args match
+          case List(BuiltinArg.BExpr(_, BlockCoord(x)), BuiltinArg.BExpr(_, BlockCoord(y)), BuiltinArg.BExpr(_, BlockCoord(z)), BuiltinArg.BExpr(_, Expr.ZString(_, path))) =>
+            Some(((x, y, z), path))
+          case List(BuiltinArg.BExpr(_, BlockCoord(x)), BuiltinArg.BExpr(_, BlockCoord(y)), BuiltinArg.BExpr(_, BlockCoord(z))) =>
+            Some(((x, y, z), ""))
+          case _ => None
+    object BossbarStore:
+      def unapply(args: List[BuiltinArg])(using FuncContext): Option[(ResourceLocation, String)] =
+        args match
+          case List(BuiltinArg.BExpr(_, ResourcePath(bossbarId)), BuiltinArg.BExpr(_, Identifier(maxOrValue))) =>
+            Some((bossbarId, maxOrValue))
+          case _ => None
+      def unapply(it: ast.Expr)(using FuncContext): Option[(ResourceLocation, String)] =
+        it match
+          case Expr.ZBuiltinCall(pos, ast.BuiltinCall("bossbar", BossbarStore(bossbarId, maxOrValue))) =>
+            Some((bossbarId, maxOrValue))
+          case _ => None
+    object IntegralExpr:
+      def unapply(it: ast.Expr): Option[Int] =
+        it match
+          case Expr.ZByte(_, b) => Some(b.toInt)
+          case Expr.ZShort(_, s) => Some(s.toInt)
+          case Expr.ZInt(_, i) => Some(i.toInt)
+          case Expr.ZLong(_, l) => Some(l.toInt)
+          case Expr.Unary(_, UnaryKind.Negate, IntegralExpr(value)) => Some(-value)
+          case _ => None
+    object NumericExpr:
+      def unapply(it: ast.Expr): Option[Double] =
+        it match
+          case Expr.ZByte(_, b) => Some(b.toDouble)
+          case Expr.ZShort(_, s) => Some(s.toDouble)
+          case Expr.ZInt(_, i) => Some(i.toDouble)
+          case Expr.ZLong(_, l) => Some(l.toDouble)
+          case Expr.ZFloat(_, f) => Some(f.toDouble)
+          case Expr.ZDouble(_, d) => Some(d)
+          case Expr.Unary(_, UnaryKind.Negate, NumericExpr(value)) => Some(-value)
+          case _ => None
+
+
   case class CommandCoord(pos: Double, mode: PositionMode)
+  object CommandCoord:
+    import exprUnapply.*
+    def unapply(it: ast.Expr): Option[CommandCoord] =
+      it match
+        case Expr.Unary(_, UnaryKind.Tilde, NumericExpr(value)) =>
+          Some(CommandCoord(value, PositionMode.Relative))
+        case Expr.Unary(_, UnaryKind.Caret, NumericExpr(value)) =>
+          Some(CommandCoord(value, PositionMode.Caret))
+        case NumericExpr(value) =>
+          Some(CommandCoord(value, PositionMode.Absolute))
+        case _ => None
+  case class BlockCoord(pos: Int, mode: PositionMode)
+  object BlockCoord:
+    import exprUnapply.*
+    def unapply(arg: ast.Expr): Option[BlockCoord] =
+      arg match
+        case Expr.Unary(_, UnaryKind.Tilde, IntegralExpr(value)) =>
+          Some(BlockCoord(value, PositionMode.Relative))
+        case Expr.Unary(_, UnaryKind.Caret, IntegralExpr(value)) =>
+          Some(BlockCoord(value, PositionMode.Caret))
+        case IntegralExpr(value) =>
+          Some(BlockCoord(value, PositionMode.Absolute))
+        case _ => None
+    def unapply(builtin: BuiltinArg): Option[BlockCoord] =
+      builtin match
+        case BuiltinArg.BExpr(_, BlockCoord(x)) => Some(x)
+        case _ => None
 
   given MCFunctionDisplay[CommandCoord] = x =>
+    s"${x.mode.prefix}${x.pos}"
+  given MCFunctionDisplay[BlockCoord] = x =>
     s"${x.mode.prefix}${x.pos}"
 
   def chainExecuteCommand(rootCommand: String, childCommand: String): String =
@@ -612,52 +810,61 @@ object Compiler:
     chainExecuteCommand(s"execute $prefixInstruction", childCommand)
 
   object builtinExecute:
+    import exprUnapply.*
     case class BuiltinExecuteComponent(name: String, run: (Compiler, util.Location, List[BuiltinArg]) => FuncContext ?=> String throws CompileError)
     object BuiltinExecuteComponent:
       def make(name: String)(run: (Compiler, util.Location, List[BuiltinArg]) => FuncContext ?=> String throws CompileError): BuiltinExecuteComponent =
         BuiltinExecuteComponent(name, run)
 
-    object NumericAstExpr:
-      def unapply(it: ast.Expr): Option[Double] =
-        it match
-          case Expr.ZByte(_, b) => Some(b.toDouble)
-          case Expr.ZShort(_, s) => Some(s.toDouble)
-          case Expr.ZInt(_, i) => Some(i.toDouble)
-          case Expr.ZLong(_, l) => Some(l.toDouble)
-          case Expr.ZFloat(_, f) => Some(f.toDouble)
-          case Expr.ZDouble(_, d) => Some(d)
-          case Expr.Unary(_, UnaryKind.Negate, NumericAstExpr(value)) => Some(-value)
-          case _ => None
-
+    
     object BuiltinRotation:
       def unapply(it: BuiltinArg): Option[CommandCoord] =
         it match
-          case BuiltinArg.BExpr(_, BuiltinCommandCoord(rot)) if rot.mode != PositionMode.Caret =>
+          case BuiltinArg.BExpr(_, CommandCoord(rot)) if rot.mode != PositionMode.Caret =>
             Some(rot)
           case _ => None
 
-    object BuiltinCommandCoord:
-      def unapply(it: ast.Expr): Option[CommandCoord] =
-        it match
-          case Expr.Unary(_, UnaryKind.Tilde, NumericAstExpr(value)) =>
-            Some(CommandCoord(value, PositionMode.Relative))
-          case Expr.Unary(_, UnaryKind.Caret, NumericAstExpr(value)) =>
-            Some(CommandCoord(value, PositionMode.Caret))
-          case NumericAstExpr(value) =>
-            Some(CommandCoord(value, PositionMode.Absolute))
-          case _ => None
 
     object BuiltinVec3:
       def unapply(it: BuiltinArg): Option[(CommandCoord, CommandCoord, CommandCoord)] =
         it match
-          case BuiltinArg.BExpr(_, Expr.ZList(_, ast.ArrayKind.Any, List(BuiltinCommandCoord(x), BuiltinCommandCoord(y), BuiltinCommandCoord(z)))) =>
+          case BuiltinArg.BExpr(_, Expr.ZList(_, ast.ArrayKind.Any, List(CommandCoord(x), CommandCoord(y), CommandCoord(z)))) =>
             Some((x, y, z))
           case _ => None
       def unapply(it: List[BuiltinArg]): Option[(CommandCoord, CommandCoord, CommandCoord)] =
         it match
-          case List(BuiltinArg.BExpr(_, BuiltinCommandCoord(x)), BuiltinArg.BExpr(_, BuiltinCommandCoord(y)), BuiltinArg.BExpr(_, BuiltinCommandCoord(z))) =>
+          case List(BuiltinArg.BExpr(_, CommandCoord(x)), BuiltinArg.BExpr(_, CommandCoord(y)), BuiltinArg.BExpr(_, CommandCoord(z))) =>
             Some((x, y, z))
           case _ => None
+
+    def handleStore(compiler: Compiler, pos: util.Location, args: List[BuiltinArg])(using context: FuncContext): String throws CompileError =
+      args match
+        case List(BuiltinArg.BExpr(subPos, BossbarStore(bossbarId, maxOrValue))) =>
+          maxOrValue match
+            case "max" | "value" => ()
+            case _ =>
+              compiler.report.nonfatal:
+                CompileError.nonfatal(subPos, "Expected 'max' or 'value'")
+          mcfunc"bossbar $bossbarId $maxOrValue"
+        case List(BuiltinArg.BExpr(_, ScoreboardPath(score))) =>
+          // store in scoreboard
+          mcfunc"score $score"
+          
+        
+        case List(BuiltinArg.BExpr(_, expr),
+                  BuiltinArg.BExpr(_, Identifier(kind)),
+                  BuiltinArg.BExpr(_, NumericExpr(scale))) =>
+                    val assignTarget = compiler.compileAssignTarget(expr)
+                    assignTarget match
+                      case AssignTarget.Data(dataKind) =>
+                        mcfunc"$dataKind $kind ${scale.toString}"
+                      case _ =>
+                        throw InternalError(pos, "Scoreboard case should have been handled already")
+
+        case _ =>
+          throw CompileError.nonfatal(pos, "Invalid store arguments")
+
+
 
     object Anchor:
       def unapply(it: BuiltinArg): Option[String] =
@@ -735,6 +942,14 @@ object Compiler:
             case _ =>
               throw CompileError.nonfatal(pos, "Expected selector or rotation")
         },
+        BuiltinExecuteComponent.make("store_success") { (compiler, pos, args) => context ?=>
+          val storeStr = handleStore(compiler, pos, args)
+          s"store success $storeStr"
+        },
+        BuiltinExecuteComponent.make("store_result") { (compiler, pos, args) => context ?=>
+          val storeStr = handleStore(compiler, pos, args)
+          s"store result $storeStr"
+        }
       ).map(it => (it.name, it)).toMap
 
     def compileFinalCommand(compiler: Compiler, pos: util.Location, arg: ast.BuiltinArg)(using context: FuncContext): String throws CompileError =
@@ -781,18 +996,17 @@ object Compiler:
           throw CompileError.nonfatal(pos, "Expected block or function call")
 
   object builtinDefinitions:
+    import exprUnapply.*
     def spawn(replace: Boolean)(compiler: Compiler, pos: util.Location, args: List[BuiltinArg])(using context: FuncContext): Expression throws CompileError =
       val (call, value, timeStr) =
         args match
-          case List(BuiltinArg.BExpr(_, builtinExecute.NumericAstExpr(value)), BuiltinArg.BExpr(_, Expr.ZVariable(_, identifier)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
-            if identifier.modules.nonEmpty || identifier.namespace.isDefined then
-              throw CompileError.nonfatal(pos, "Expected identifier to be 'ticks', 't', 'seconds', 's', 'days' or 'd'. Got a full storage specifier instead.")
-            (call, value, identifier.name)
+          case List(BuiltinArg.BExpr(_, NumericExpr(value)), BuiltinArg.BExpr(_, Identifier(timeStr)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
+            (call, value, timeStr)
           case List(BuiltinArg.BExpr(_, Expr.ZString(strPos, str)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
             val (num, unit) = (str.init, str.last)
             val goodNum = num.toDoubleOption.getOrElse(throw CompileError.nonfatal(strPos, "Expected string to be a number with a unit at the end (either s, t, or d)"))
             (call, goodNum, unit.toString)
-          case List(BuiltinArg.BExpr(_, builtinExecute.NumericAstExpr(value)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
+          case List(BuiltinArg.BExpr(_, NumericExpr(value)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
             (call, value, "t")
           case _ =>
             throw CompileError.nonfatal(pos, "Expected a number, optionally a unit of measurement, and a function call.")
@@ -827,28 +1041,29 @@ object Compiler:
         Builtin.exprOnly("reset") { (_, pos, args) => context ?=>
           val (name, score) =
             args match
-              case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, Expr.ZVariable(_, path))) =>
+              case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, ResourcePath(path))) =>
                 (name, path)
+              case List(BuiltinArg.BExpr(_, ScoreboardPath(score))) =>
+                (score.name, score.scoreboard)
               case _ =>
                 throw CompileError.nonfatal(pos, "Expected a name and a path")
           
-          val scoreboardLoc = ScoreboardLocation(ResourceLocation.resolveResource(context.location, score), name)
+          val scoreboardLoc = ScoreboardLocation(score, name)
           context.code.append(mcfunc"scoreboard players reset ${scoreboardLoc}")
 
           Expression.void(pos)
           
         },
         Builtin.exprOnly("enable") { (_, pos, args) => context ?=>
-          args match
-            case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, Expr.ZVariable(_, score))) =>
-              val scoreboardLoc = ScoreboardLocation(ResourceLocation.resolveResource(context.location, score), name)
-              context.code.append(mcfunc"scoreboard players enable ${scoreboardLoc}")
-
-              Expression.void(pos)
-            case _ =>
-              throw CompileError.nonfatal(pos, "Expected a name and a path.")
-
-
+          val scoreboard =
+            args match
+              case List(BuiltinArg.BExpr(_, Expr.ZString(_, name)), BuiltinArg.BExpr(_, ResourcePath(score))) =>
+                ScoreboardLocation(score, name)
+              case List(BuiltinArg.BExpr(_, ScoreboardPath(score))) => score
+              case _ =>
+                throw CompileError.nonfatal(pos, "Expected a name and a path.")
+          context.code.append(mcfunc"scoreboard players enable ${scoreboard}")
+          Expression.void(pos)
         },
         Builtin.exprOnly("check") { (_, pos, args) => context ?=>
           args match
@@ -857,11 +1072,17 @@ object Compiler:
             case _ =>
               throw CompileError.nonfatal(pos, "Expected check code (the bit that comes after `if` in execute commands)")
         },
+        Builtin.exprOnly("is_block") { (_, pos, args) => context ?=>
+          args match
+            case List(BuiltinArg.BExpr(_, BlockCoord(x)), BuiltinArg.BExpr(_, BlockCoord(y)), BuiltinArg.BExpr(_, BlockCoord(z)), BuiltinArg.BExpr(_, Expr.ZString(_, blockPredicate))) =>
+              Expression(pos, false, ExpressionKind.ECondition(Condition.Check(mcfunc"block $x $y $z $blockPredicate")))
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected block pos and block predicate")
+        },
         Builtin.insertOnly("scoreboard_string") { (_, pos, args) => context ?=>
           args match
-            case List(BuiltinArg.BExpr(_, Expr.ZVariable(_, path))) =>
-              val resolved = ResourceLocation.resolveResource(context.location, path)
-              ScoreboardLocation.scoreboardStringOf(resolved)
+            case List(BuiltinArg.BExpr(_, ResourcePath(path))) =>
+              ScoreboardLocation.scoreboardStringOf(path)
             case _ =>
               throw CompileError.nonfatal(pos, "Expected path")
         },
@@ -870,6 +1091,26 @@ object Compiler:
         Builtin.wrapComponent(builtinExecute.components("as")),
         Builtin.wrapComponent(builtinExecute.components("at")),
         Builtin.wrapComponent(builtinExecute.components("positioned")),
+        Builtin.wrapComponent(builtinExecute.components("store_success")),
+        Builtin.wrapComponent(builtinExecute.components("store_result")),
+        Builtin.exprOnly("store_from") { (compiler, pos, args) => context ?=> 
+          args match
+            case Nil =>
+              throw CompileError.nonfatal(pos, "Expected at least 1 argument")
+            case _ =>
+              val init = args.init
+              val last = args.last
+              val storeStr = builtinExecute.handleStore(compiler, pos, init)
+              last match
+                case BuiltinArg.BExpr(_, ScoreboardPath(score)) =>
+                  context.code += mcfunc"execute store result $storeStr run scoreboard players get $score"
+                case BuiltinArg.BExpr(_, StoragePath(_, storage)) =>
+                  context.code += mcfunc"execute store result $storeStr run data get storage $storage"
+                case _ =>
+                  throw CompileError.nonfatal(pos, "TODO: make this more generic")
+              Expression.void(pos)
+              
+        },
         Builtin.exprOnly("execute") { (compiler, pos, args) => context ?=> 
           args match
             case Nil =>
@@ -893,70 +1134,107 @@ object Compiler:
               val executeCommand = chainExecuteInstruction(strs.mkString(" "), finalCommand)
               context.code.append(executeCommand)
               Expression.void(pos)
-
-                    
-
+        },
+        Builtin.exprOnly("storage") { (_, pos, args) => context ?=>
+          args match
+            case StoragePath(path) =>
+              Expression(pos, false, ExpressionKind.EStorage(path))
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected storage resource location and nbt path")
+        },
+        Builtin.exprOnly("entity") { (_, pos, args) => context ?=>
+          args match
+            case EntityStorage(selector, path) =>
+              Expression(pos, false, ExpressionKind.EEntity(selector, path))
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected entity selector and nbt path")
+        },
+        Builtin.exprOnly("block_entity") { (_, pos, args) => context ?=>
+          args match
+            case BlockEntityStorage(blockPos, path) =>
+              Expression(pos, false, ExpressionKind.EBlock(blockPos, path))
+            case _ =>
+              throw CompileError.nonfatal(pos, "Expected block position and nbt path")
         }
       ).map(it => (it.name, it)).toMap
 
-  trait Builtin:
-    val name: String
-
-    @nowarn("id=E198")
+  case class Builtin(name: String, 
+                     exprFn: Option[(Compiler, util.Location, ast.BuiltinCall) => FuncContext ?=> Expression throws CompileError] = None,
+                     insertFn: Option[(Compiler, util.Location, ast.BuiltinCall) => FuncContext ?=> String throws CompileError] = None,
+                     declFn: Option[(Compiler, util.Location, ast.BuiltinCall, ResourceLocation) => Unit throws CompileError] = None):
+    
     def expr(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
-      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in expressions")
-
-    @nowarn("id=E198")
+      exprFn.getOrElse(throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in expressions"))(compiler, pos, call)
     def inserted(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall)(using context: FuncContext): String throws CompileError =
-      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in inserts")
-
-    @nowarn("id=E198")
+      insertFn.getOrElse(throw CompileError.nonfatal(pos, s"The $name builtin doesn't work in inserts"))(compiler, pos, call)
     def decl(compiler: Compiler, pos: util.Location, call: ast.BuiltinCall, location: ResourceLocation): Unit throws CompileError =
-      throw CompileError.nonfatal(pos, s"The $name builtin doesn't work at toplevel")
+      declFn.getOrElse(throw CompileError.nonfatal(pos, s"The $name builtin doesn't work at toplevel"))(compiler, pos, call, location)
+
+    def tryInlineExpression: Builtin =
+      copy(
+        insertFn =
+          Some:
+            (compiler, pos, call) =>
+              exprFn match
+                case Some(it) =>
+                  val res = it(compiler, pos, call)
+                  res.kind.toComptimeString(true).getOrElse(throw CompileError.nonfatal(pos, "Expression has no comptime representation"))
+                case None =>
+                  throw CompileError.nonfatal(pos, "This builtin has no expression function to inline")
+
+            
+      )
 
   object Builtin:
     def wrapComponent(child: builtinExecute.BuiltinExecuteComponent): Builtin =
-      new Builtin:
-        override val name: String = child.name
-
-        override def expr(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
-          if call.args.isEmpty then
-            throw CompileError.nonfatal(pos, "Expected arguments")
-          else
-            val instruction = child.run(compiler, pos, call.args.init)
-            val finalCommand = builtinExecute.compileFinalCommand(compiler, pos, call.args.last)
-            context.code += chainExecuteInstruction(instruction, finalCommand)
-            Expression.void(pos)
-
+      Builtin(
+        child.name,
+        exprFn =
+          Some:
+            (compiler, pos, call) => context ?=> {
+              if call.args.isEmpty then
+                throw CompileError.nonfatal(pos, "Expected arguments")
+              else
+                val instruction = child.run(compiler, pos, call.args.init)
+                val finalCommand = builtinExecute.compileFinalCommand(compiler, pos, call.args.last)
+                context.code += chainExecuteInstruction(instruction, finalCommand)
+                Expression.void(pos)
+            }
+      )
 
     // Side effect that can be in Expr or Decl position
     def sideEffect(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg],ResourceLocation) => Unit throws CompileError): Builtin =
-      new Builtin:
-        override val name: String = nameArg
-
-        override def expr(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
-          func(compiler, pos, call.args, context.location)
-          Expression.void(pos)
-
-
-        override def decl(compiler: Compiler, pos: Location, call: ast.BuiltinCall, location: ResourceLocation): Unit throws CompileError =
-          func(compiler, pos, call.args, location)
+      Builtin(
+        nameArg,
+        exprFn =
+          Some:
+            (compiler, pos, call) => context ?=>
+              func(compiler, pos, call.args, context.location)
+              Expression.void(pos),
+        declFn =
+          Some:
+            (compiler, pos, call, location) =>
+              func(compiler, pos, call.args, location)
+      )
 
     def insertOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg]) => FuncContext ?=> String throws CompileError): Builtin =
-      new Builtin:
-        override val name: String = nameArg
-
-
-        override def inserted(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): String throws CompileError =
-          func(compiler, pos, call.args)
+      Builtin(
+        nameArg,
+        insertFn =
+          Some:
+            (compiler, pos, call) => context ?=>
+              func(compiler, pos, call.args)
+      )
 
 
     def exprOnly(nameArg: String)(func: (Compiler, util.Location, List[ast.BuiltinArg]) => FuncContext ?=> Expression throws CompileError): Builtin =
-      new Builtin:
-        override val name: String = nameArg
-
-        override def expr(compiler: Compiler, pos: Location, call: ast.BuiltinCall)(using context: FuncContext): Expression throws CompileError =
-          func(compiler, pos, call.args)
+      Builtin(
+        nameArg,
+        exprFn =
+          Some:
+            (compiler, pos, call) =>
+              func(compiler, pos, call.args)
+      )
 
   enum ScoreKind:
     case Direct(operation: String)
@@ -1536,9 +1814,16 @@ class Compiler:
       case EvaluatedCondition.Known(true) =>
         compileBlock(body)
       case EvaluatedCondition.Check(checkCode) =>
+        if body.nonEmpty && body.tail.isEmpty then
+          body.head match
+            case ast.Stmt.ZReturn(_, None) =>
+              context.code += s"execute $checkCode run return 0"
+              return
+            case _ => ()
         val parameterStorage = context.location
         val func = nextFunction("if", context.location.namespace)
         val subContext = context.nested(NestKind.Transparent, func, None)
+        
         compileBlock(body)(using subContext)
         val command =
           subContext.code.length match
@@ -1975,7 +2260,19 @@ class Compiler:
         case ExpressionKind.EStorage(loc) =>
           val tempStorage = nextStorage(context.location.namespace)
           context.code.append(
-            mcfunc"${if operand.needsMacro then "$" else ""}execute store result storage ${tempStorage} int -1 run data get ${loc}"
+            mcfunc"${if operand.needsMacro then "$" else ""}execute store result storage ${tempStorage} int -1 run data get storage ${loc}"
+          )
+          ExpressionKind.EStorage(tempStorage)
+        case ExpressionKind.EEntity(selector, path) =>
+          val tempStorage = nextStorage(context.location.namespace)
+          context.code.append(
+            mcfunc"${if operand.needsMacro then "$" else ""}execute store result storage ${tempStorage} int -1 run data get entity $selector $path"
+          )
+          ExpressionKind.EStorage(tempStorage)
+        case ExpressionKind.EBlock((x, y, z), path) =>
+          val tempStorage = nextStorage(context.location.namespace)
+          context.code.append(
+            mcfunc"${if operand.needsMacro then "$" else ""}execute store result storage ${tempStorage} int -1 run data get block $x $y $z $path"
           )
           ExpressionKind.EStorage(tempStorage)
         case ExpressionKind.EScoreboard(loc) =>
@@ -1984,6 +2281,7 @@ class Compiler:
             mcfunc"${if operand.needsMacro then "$" else ""}execute store result storage ${tempStorage} int -1 run scoreboard players get ${loc}"
           )
           ExpressionKind.EStorage(tempStorage)
+        
         case ExpressionKind.EMacro(_) =>
           val tempStorage = copyToStorage(context.code, operand, context.location.namespace)
           context.code.append(
@@ -2031,24 +2329,50 @@ class Compiler:
       case _ =>
         compileAssignment(left, parser.ast.Expr.Binop(right.pos, operator.binopKind, left, right))
 
+  def compileAssignTarget(expr: parser.ast.Expr)(using context: FuncContext): AssignTarget throws CompileError =
+    expr match
+      case exprUnapply.StoragePath(_, storage) =>
+        AssignTarget.Data(DataKind.Storage(storage))
+      case exprUnapply.ScoreboardPath(scoreboard) =>
+        AssignTarget.Scoreboard(scoreboard)
+      case exprUnapply.EntityStorage(_, selector, path) =>
+        AssignTarget.Data(DataKind.Entity(selector, path))
+      case exprUnapply.BlockEntityStorage(_, blockPos, path) =>
+        AssignTarget.Data(DataKind.Block(blockPos, path))
+      case ast.Expr.ZMember(pos, name, root) =>
+        compileAssignTarget(root) match
+          case AssignTarget.Data(kind) => 
+            AssignTarget.Data(kind.subPath(name))
+          case AssignTarget.Scoreboard(_) =>
+            throw CompileError.nonfatal(pos, "Can't index scoreboard")
+      case ast.Expr.ZIndex(pos, index, root) =>
+        val idx = compileExpression(index, false)
+        idx.kind.numericValue match
+          case Some(value) =>
+            compileAssignTarget(root) match
+              case AssignTarget.Data(kind) =>
+                AssignTarget.Data(kind.index(value))
+              case _ => 
+                throw CompileError.nonfatal(pos, "Can't index scoreboard")
+          case None =>
+            throw CompileError.nonfatal(pos, "TODO: Dynamic index")
+      case _ =>
+        throw CompileError.nonfatal(expr.pos, "Invalid assignment target")
+        
 
   def compileAssignment(left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression throws CompileError =
-    left match
-      case Expr.ZVariable(_, path) =>
+    compileAssignTarget(left) match
+      case AssignTarget.Scoreboard(scoreboard) =>
         val l = compileExpression(left, false)
         val r = compileExpression(right, false)
-        val storage = StorageLocation.resolveResource(context.location, path)
-        setStorage(context.code, storage, r)
-        l
-      case Expr.ZScoreboardVariable(_, path) =>
-        val l = compileExpression(left, false)
-        val r = compileExpression(right, false)
-        val scoreboard = ScoreboardLocation.resolveResource(context.location, path)
         setScoreboard(context.code, scoreboard, r)
         useScoreboard(scoreboard.scoreboardString)
         l
-        
-      case _ => throw CompileError.nonfatal(left.pos, "Can only assign to a variable")
+      case AssignTarget.Data(data) =>
+        val l = compileExpression(left, false)
+        val r = compileExpression(right, false)
+        setData(context.code, data, r, context.location.namespace)
+        l
 
 
   def compileMatchComparison(code: mutable.ArrayBuffer[String], value: Expression, range: MatchRange, namespace: String): ExpressionKind throws CompileError =
@@ -2331,6 +2655,9 @@ class Compiler:
 
 
   def verifyTypes(kinds: List[Expression], kind: ast.ArrayKind, message: String): NbtType throws CompileError =
+    // Some NBT targets allow mixed types, so lets just not check it at all...
+    if kind == ArrayKind.Any then
+      return NbtType.Unknown
     var singleType =
       kind match
         case ArrayKind.Any => NbtType.Unknown
@@ -2358,6 +2685,7 @@ class Compiler:
         case (ExpressionKind.EString(_), NbtType.String) => ()
         case (ExpressionKind.EArray(_, _), NbtType.List) => ()
         case (ExpressionKind.ECondition(_), NbtType.Byte) => ()
+        case (ExpressionKind.ECompound(_), NbtType.Compound) => ()
         case _ =>
           report.nonfatal(CompileError.nonfatal(kind.location, message))
     
@@ -2411,7 +2739,11 @@ class Compiler:
       case Expr.ZBool(pos, v) => Expression(pos, false, ExpressionKind.EBoolean(v))
       case Expr.ZList(pos, kind, values) => compileArray(kind, values, pos)
       case Expr.ZCompound(pos, map) => compileCompound(pos, map)
-      case Expr.ZVariable(pos, path) => Expression(pos, false, ExpressionKind.EStorage(StorageLocation.resolveResource(context.location, path)))
+      case exprUnapply.StoragePath(pos, storage) => Expression(pos, false, ExpressionKind.EStorage(storage))
+      case member: Expr.ZMember =>
+        compileMember(member)
+      case index: Expr.ZIndex => compileIndex(index)
+      case Expr.ZVariable(pos, _) => throw InternalError(pos, "Already matched")
       case Expr.ZScoreboardVariable(pos, path) => Expression(pos, false, ExpressionKind.EScoreboard(ScoreboardLocation.resolveResource(context.location, path)))
       case Expr.ZMacroVariable(pos, name) => Expression(pos, true, ExpressionKind.EMacro(StorageLocation(context.location, "__" + name)))
       case Expr.ZBuiltinCall(pos, call) =>
@@ -2440,6 +2772,19 @@ class Compiler:
         
 
       case Expr.Atom(pos, expr) => compileExpression(expr, ignored)
+
+  def compileMember(member: parser.ast.Expr.ZMember)(using context: FuncContext): Expression throws CompileError =
+    val root = compileExpression(member.expr, false)
+    root.subPath(member.pos, member.name)
+  
+  def compileIndex(index: parser.ast.Expr.ZIndex)(using context: FuncContext): Expression throws CompileError =
+    val root = compileExpression(index.expr, false)
+    val indexExpr = compileExpression(index.index, false)
+    indexExpr.kind match
+      case ExpressionKind.Numeric(value) =>
+        root.index(index.pos, value)
+      case _ =>
+        throw CompileError.nonfatal(index.pos, "Dynamic indexing is currently unsupported")
 
   def compileModule(module: parser.ast.Decl.Module, location: ResourceLocation): Unit throws FatalCompileError =
     enterScope(module.name)
@@ -2481,10 +2826,9 @@ class Compiler:
 
     val constantCommands = constantScoreboardValues.toList.map(constant => s"scoreboard players set $$${displayConstant(constant)} yaoigen.internal.constants $constant")
     if constantCommands.nonEmpty then
-      val constantFunction = FileTree.Item.ZFunction("load", constantCommands, util.Location.blank)
+      val constantFunction = FileTree.Item.ZFunction("load", constantCommands.prepended("scoreboard objectives add yaoigen.internal.constants dummy"), util.Location.blank)
       addItem(ResourceLocation.module("yaoigen", List("internal")), constantFunction)
-      // todo, insert this in a sane spot
-      loadFunctions.append("yaoigen:internal/load")
+      loadFunctions.prepend("yaoigen:internal/load")
 
     val loadJson = MinecraftTag(loadFunctions.toList).asJson.spaces4
 
@@ -2557,9 +2901,12 @@ class Compiler:
       case ExpressionKind.EStorage(storage) => storage
       case _ => copyToStorage(code, value, namespace)
 
+  
+  def setData(code: mutable.ArrayBuffer[String], data: DataKind, value: Expression, namespace: String): Unit throws CompileError =
+    value.toData(this, code, data, "set", NbtType.Unknown, namespace)
 
   def setStorage(code: mutable.ArrayBuffer[String], storage: StorageLocation, value: Expression): Unit throws CompileError =
-    value.toStorage(this, code, storage, "set", NbtType.Unknown)
+    setData(code, DataKind.Storage(storage), value, storage.storage.namespace)
 
   def scoreboardOperation(scoreboard: ScoreboardLocation, value: Expression, operation: ScoreboardOperation)(using context: FuncContext): Unit throws CompileError =
     value.kind match
