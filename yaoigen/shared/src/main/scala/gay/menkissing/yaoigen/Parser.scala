@@ -13,7 +13,7 @@ import parsley.token.predicate.Basic
 import parsley.combinator.*
 import parsley.Parsley
 import parsley.Parsley.atomic
-
+import util.catsextras.*
 import gay.menkissing.yaoigen.parser.ast.UnresolvedResource
 
 object Parser:
@@ -236,7 +236,7 @@ class Parser(val fileInfo: FileInfo):
   }
 
   lazy val callOrVariable: Parsley[ast.Expr] =
-    (fileInfo.pos, unresolvedResource).tupled <**>
+    (fileInfo.pos, unresolvedResource).reverseApN:
       choice(
         functionArguments.map[((util.Location, UnresolvedResource)) => ast.Expr](args => { case (pos, path) => ast.Expr.ZFunctionCall(pos, ast.FunctionCall(path, args)) }).label("function call"),
         Parsley.pure[((util.Location, UnresolvedResource)) => ast.Expr] { case (pos, path) => ast.Expr.ZVariable(pos, path) }.label("variable")
@@ -244,7 +244,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val floating: Parsley[ast.Expr] =
     lexeme:
-      (fileInfo.pos, lexer.nonlexeme.floating.number).tupled <**>
+      (fileInfo.pos, lexer.nonlexeme.floating.number).reverseApN:
         choice(
           (parsley.character.satisfy(_.toLower == 'f') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZFloat(pos, i.toFloat)),
           (parsley.character.satisfy(_.toLower == 'd') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZDouble(pos, i.toDouble)),
@@ -253,7 +253,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val integral: Parsley[ast.Expr] = 
     lexeme:
-      (fileInfo.pos, lexer.nonlexeme.integer.number).tupled <**>
+      (fileInfo.pos, lexer.nonlexeme.integer.number).reverseApN:
       // TODO: someway to error out here if we truncate?
         choice(
           (parsley.character.satisfy(_.toLower == 'b') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZByte(pos, i.toByte)),
@@ -397,7 +397,7 @@ class Parser(val fileInfo: FileInfo):
 
 
   lazy val resourceRefOrCall: Parsley[ast.InsertedExpr] =
-    (fileInfo.pos, unresolvedResource).tupled <**>
+    (fileInfo.pos, unresolvedResource).reverseApN:
       choice(
         functionArguments.map(args => {case (pos, res) => ast.InsertedExpr.ZFunctionCall(pos, ast.FunctionCall(res, args), false)}),
         Parsley.pure { case (pos, res) => ast.InsertedExpr.ResourceRef(pos, res) }
