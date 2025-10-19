@@ -4,7 +4,7 @@ import cats.*
 import cats.implicits.*
 
 object catsextras {
-  extension[F[_], A] (self: F[A])(using app: Applicative[F]) {
+  extension[F[_], A] (self: F[A])(using app: Apply[F]) {
     infix def <**>[B](that: F[A => B]): F[B] =
         (self, that).mapN((x, f) => f(x))
   }

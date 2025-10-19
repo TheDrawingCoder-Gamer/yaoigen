@@ -59,7 +59,7 @@ case class ResolveResult(
   resultTree: List[ast.Namespace]
   )
 
-case class ResolveContext(fileInfo: util.FileInfo)
+case class ResolveContext(fileInfo: util.FileInfo, subModuleAllowed: Boolean)
 
 class Resolver:
   import Resolver.*
@@ -100,6 +100,8 @@ class Resolver:
       case Module(p, name, items) =>
         Module(p, name, resolveModule(name, items, location, parentScope))
       case UseModule(modulePos, name) =>
+        if !ctx.subModuleAllowed then
+          throw ResolutionError(modulePos, Seq("Can't do submodules inside an included file.", "If you need submodules, make the entire heirarchy submodules."))
         val newPath =
           if ctx.fileInfo.root == ctx.fileInfo.file then
             // resolve sibling
@@ -109,7 +111,7 @@ class Resolver:
             assert(ctx.fileInfo.file.endsWith(".yaoi"))
             Path.of(ctx.fileInfo.file.dropRight(5)).resolve(name + ".yaoi")
         val newInfo = ctx.fileInfo.copy(file = newPath.toString)
-        Module(modulePos, name, resolveModule(name, parseIncludedItems(modulePos, newPath.toString), location, parentScope)(using ResolveContext(newInfo)))
+        Module(modulePos, name, resolveModule(name, parseIncludedItems(modulePos, newPath.toString), location, parentScope)(using ctx.copy(fileInfo = newInfo)))
 
       case IncludedItems(pos, from, _) =>
         val newPath =
@@ -117,7 +119,7 @@ class Resolver:
         val newInfo = ctx.fileInfo.copy(file = newPath.toString)
         IncludedItems(pos, from, 
           parseIncludedItems(pos, newPath.toString).map: it =>
-            resolveItem(it, location, parentScope)(using ResolveContext(newInfo))
+            resolveItem(it, location, parentScope)(using ResolveContext(newInfo, false))
         )
         
 
@@ -181,7 +183,7 @@ class Resolver:
         try
           val newNses =
             tree.map: ns =>
-              resolveNamespace(ns, 0)(using ResolveContext(FileInfo(root, root)))
+              resolveNamespace(ns, 0)(using ResolveContext(FileInfo(root, root), true))
           
           Right(ResolveResult(scopes.toVector, config, tickFunctions.toList, loadFunctions.toList, usedScoreboards.toMap, functionRegistry.toMap, newNses))
         catch

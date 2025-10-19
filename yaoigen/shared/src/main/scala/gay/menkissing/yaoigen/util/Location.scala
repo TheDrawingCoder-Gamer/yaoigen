@@ -4,11 +4,9 @@ import parsley.Parsley
 import parsley.position.pos as ppos
 import cats.*
 
-import java.nio.file.Path
-
 case class Location(line: Int, column: Int, file: String, root: String):
   def pretty: String =
-    s"${Path.of(root, file).toString}:${line}:${column}"
+    s"${file}:${line}:${column}"
 
 given Show[Location] = _.pretty
 
