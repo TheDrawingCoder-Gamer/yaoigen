@@ -15,5 +15,5 @@ object Location:
     Location(0, 0, "", "")
 
 case class FileInfo(file: String, root: String):
-  val pos: Parsley[Location] =
+  lazy val pos: Parsley[Location] =
     ppos.map((line, col) => Location(line, col, file, root))

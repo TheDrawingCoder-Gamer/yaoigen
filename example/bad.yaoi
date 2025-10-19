@@ -1,4 +1,6 @@
 module bad {
     // test for rejecting submodules inside included file
     module incorrect;
+
+
 }

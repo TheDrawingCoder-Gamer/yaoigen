@@ -21,13 +21,24 @@ object Resolver:
     def showPretty: String
   case class ParseError(err: String) extends ResolverError:
     override def showPretty: String = err
-  case class ResolutionError(location: util.Location, msg: Seq[String]) extends ResolverError:
+  case class ResolutionError(location: Option[util.Location], msg: Seq[String]) extends ResolverError:
     override def showPretty: String =
-      s"${location.pretty}\n${msg.mkString("\n")}"
+      location match
+        case Some(v) =>
+          error.LocationError.show(v, msg)
+        case None =>
+          msg.mkString("\n")
 
   object ResolutionError:
+    def apply(loc: util.Location, msg: Seq[String]): ResolutionError =
+      ResolutionError(Some(loc), msg)
     def apply(loc: util.Location, msg: String): ResolutionError =
-      ResolutionError(loc, Seq(msg))
+      ResolutionError(Some(loc), Seq(msg))
+
+    def global(msg: Seq[String]): ResolutionError =
+      ResolutionError(None, msg)
+    def global(msg: String): ResolutionError =
+      ResolutionError(None, Seq(msg))
 
   // mutable scope
   class Scope(
@@ -71,6 +82,18 @@ class Resolver:
   val usedScoreboards = mutable.HashMap[String, String]()
   val functionRegistry = mutable.HashMap[ResourceLocation, FunctionDefinition]()
 
+  object report:
+    val nonfatalErrors = mutable.ArrayBuffer[ResolverError]()
+
+    def apply(err: ResolverError): Unit =
+      nonfatalErrors.append(err)
+    
+    def displayAll: Unit throws ResolverError =
+      nonfatalErrors.foreach: it =>
+        println(it.showPretty)
+      if nonfatalErrors.nonEmpty then
+        throw ResolutionError.global(Seq("Resolution errors found", "(couldn't parse and assemble all files)"))
+
   def pushScope(name: String, parent: Int): Int =
     scopes.append(Scope(parent))
     val index = scopes.length - 1
@@ -92,30 +115,33 @@ class Resolver:
     val file = File(path)
     parser.parseIncludedItems.parseFile(file).toEither.left.map(_ => ResolutionError(pos, "Couldn't open file"))
       .flatMap(_.toEither.left.map[ResolverError](ParseError.apply)) match
-        case Left(err) => throw err
+        case Left(err) =>
+          report(err)
+          List()
         case Right(items) => items
   def resolveItem(item: ast.Decl, location: ResourceLocation, parentScope: Int)(using ctx: ResolveContext): ast.Decl throws ResolverError =
     import ast.Decl.*
     item match
       case Module(p, name, items) =>
         Module(p, name, resolveModule(name, items, location, parentScope))
-      case UseModule(modulePos, name) =>
+      case m @ UseModule(modulePos, name) =>
         if !ctx.subModuleAllowed then
-          throw ResolutionError(modulePos, Seq("Can't do submodules inside an included file.", "If you need submodules, make the entire heirarchy submodules."))
+          report(ResolutionError(modulePos, Seq("Can't do submodules inside an included file.", "If you need submodules, make the entire heirarchy submodules.")))
+          return m
         val newPath =
           if ctx.fileInfo.root == ctx.fileInfo.file then
             // resolve sibling
-            Path.of(ctx.fileInfo.root).resolveSibling(name + ".yaoi")
+            Path.of(ctx.fileInfo.root).resolveSibling(name + ".yaoi").normalize()
           else
             // resolve subdirectory
             assert(ctx.fileInfo.file.endsWith(".yaoi"))
-            Path.of(ctx.fileInfo.file.dropRight(5)).resolve(name + ".yaoi")
+            Path.of(ctx.fileInfo.file.dropRight(5)).resolve(name + ".yaoi").normalize()
         val newInfo = ctx.fileInfo.copy(file = newPath.toString)
         Module(modulePos, name, resolveModule(name, parseIncludedItems(modulePos, newPath.toString), location, parentScope)(using ctx.copy(fileInfo = newInfo)))
 
       case IncludedItems(pos, from, _) =>
         val newPath =
-          Path.of(ctx.fileInfo.file).resolveSibling(from + ".yaoi")
+          Path.of(ctx.fileInfo.file).resolveSibling(from + ".yaoi").normalize()
         val newInfo = ctx.fileInfo.copy(file = newPath.toString)
         IncludedItems(pos, from, 
           parseIncludedItems(pos, newPath.toString).map: it =>
@@ -131,9 +157,8 @@ class Resolver:
       case r: ZResource => r
       case c @ ZConfig(pos, data) =>
         if config.isDefined  then
-          throw ResolutionError(pos, "Duplicate mcmeta")
-        else
-          config = Some(data)
+          report(ResolutionError(pos, "Duplicate mcmeta"))
+        config = Some(data)
         c
         
       case b: ZBuiltinCall => b
@@ -185,6 +210,8 @@ class Resolver:
             tree.map: ns =>
               resolveNamespace(ns, 0)(using ResolveContext(FileInfo(root, root), true))
           
+          // displays any errors and throws if there were any at all
+          report.displayAll
           Right(ResolveResult(scopes.toVector, config, tickFunctions.toList, loadFunctions.toList, usedScoreboards.toMap, functionRegistry.toMap, newNses))
         catch
           case x: ResolverError =>

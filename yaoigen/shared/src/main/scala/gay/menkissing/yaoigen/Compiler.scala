@@ -18,7 +18,7 @@ import io.circe.*
 import io.circe.syntax.*
 
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor, Files}
+import java.nio.file.{FileVisitResult, Path, SimpleFileVisitor}
 import gay.menkissing.yaoigen.util.MCFunctionDisplay
 import gay.menkissing.yaoigen.parser.ast.BuiltinArg
 import gay.menkissing.yaoigen.util.PathHelper
@@ -54,26 +54,9 @@ object Compiler:
 
     override def getMessage: String =
       show"${location}:\n${msg.mkString("\n")}"
-    import parsley.errors.ErrorBuilder
-    def showPretty(using builder: ErrorBuilder[String]): String =
+    def showPretty: String =
+      error.LocationError.show(location, msg)
       
-      import scala.jdk.CollectionConverters.*
-      val badFile = Path.of(location.file)
-      try
-        val lines = Files.readAllLines(badFile).asScala.toList
-        val lineInfo = builder.lineInfo(lines(location.line - 1), Seq(), Seq(), location.column, 1)
-
-        val rawMessages = msg.map(builder.message)
-        val messages = builder.combineMessages(rawMessages)
-        
-        val errLines = builder.specialisedError(messages, lineInfo)
-        
-        val pos = builder.pos(location.line, location.column)
-        val source = builder.source(Some(badFile.toString))
-
-        builder.format(pos, source, errLines)
-      catch
-        case _ => this.getMessage
 
   case class NonfatalCompileError(location: util.Location, msg: Seq[String]) extends CompileError
   case class FatalCompileError(location: util.Location, msg: Seq[String]) extends CompileError

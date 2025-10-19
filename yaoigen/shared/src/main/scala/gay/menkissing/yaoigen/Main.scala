@@ -1,7 +1,5 @@
 package gay.menkissing.yaoigen
 
-import parsley.*
-
 import language.experimental.saferExceptions
 
 object Main:
