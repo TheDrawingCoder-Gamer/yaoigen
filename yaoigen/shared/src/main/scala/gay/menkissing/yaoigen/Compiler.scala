@@ -1580,10 +1580,9 @@ object Compiler:
 class Compiler:
   import Compiler.*
   import Resolver.FunctionDefinition
-  var scopes: Vector[Resolver.Scope] = Vector()
   val usedScoreboards: mutable.HashMap[String, String] = mutable.HashMap()
   val constantScoreboardValues: mutable.HashSet[Int] = mutable.HashSet()
-  var currentScope: Int = 0
+  var currentScope: Resolver.ResolvedScope = null
   val tickFunctions: mutable.ArrayBuffer[String] = mutable.ArrayBuffer()
   val loadFunctions: mutable.ArrayBuffer[String] = mutable.ArrayBuffer()
   val functionRegistry: mutable.HashMap[ResourceLocation, FunctionDefinition] = mutable.HashMap()
@@ -1601,7 +1600,7 @@ class Compiler:
       warnings.append(err)
 
   def loadResolved(resolve: ResolveResult): Unit =
-    this.scopes = resolve.scopes
+    this.currentScope = resolve.scope
     this.config = resolve.config
     this.tickFunctions ++= resolve.tickFunctions
     this.loadFunctions ++= resolve.loadFunctions
@@ -1620,15 +1619,11 @@ class Compiler:
 
 
   def enterScope(name: String): Unit = {
-    currentScope = scopes(currentScope).getChild(name).get
+    currentScope = currentScope.children(name)
   }
 
   def exitScope(): Unit = {
-    currentScope = scopes(currentScope).parent
-  }
-
-  def addFunction(scope: Int, name: String, location: ResourceLocation): Unit = {
-      scopes(scope).functionRegistry(name) = location
+    currentScope = currentScope.parent.get
   }
 
   def getLocation(location: ResourceLocation): mutable.ArrayBuffer[FileTree.Item] =

@@ -40,19 +40,27 @@ object Resolver:
     def global(msg: String): ResolutionError =
       ResolutionError(None, Seq(msg))
 
+  case class ResolvedScope(
+    val children: Map[String, ResolvedScope],
+    val functionRegistry: Map[String, ResourceLocation]
+  )(parentRes: => Option[ResolvedScope]):
+    lazy val parent = parentRes
+
   // mutable scope
   class Scope(
     val parent: Int,
-    val children: mutable.HashMap[String, mutable.ArrayDeque[Int]] = mutable.HashMap(),
+    val children: mutable.HashMap[String, Int] = mutable.HashMap(),
     val functionRegistry: mutable.HashMap[String, ResourceLocation] = mutable.HashMap()
     ):
-    def addChild(name: String, child: Int): Unit =
+      // this part is only ever used in Resolver, so we can just make it ResolverError
+    def addChild(name: String, child: Int): Unit throws ResolutionError =
       children.get(name) match
-        case Some(v) => v.append(child)
-        case None => children(name) = mutable.ArrayDeque(child)
+        case Some(_) => 
+          throw ResolutionError.global(s"Duplicate child $name")
+        case None => children(name) = child
 
     def getChild(name: String): Option[Int] =
-      children.get(name).map(_.removeHead())
+      children.get(name)
   
   case class FunctionDefinition(
                                location: ResourceLocation,
@@ -61,7 +69,7 @@ object Resolver:
                                )
 
 case class ResolveResult(
-  scopes: Vector[Resolver.Scope],
+  scope: Resolver.ResolvedScope,
   config: Option[Json],
   tickFunctions: List[String],
   loadFunctions: List[String],
@@ -94,7 +102,20 @@ class Resolver:
       if nonfatalErrors.nonEmpty then
         throw ResolutionError.global(Seq("Resolution errors found", "(couldn't parse and assemble all files)"))
 
-  def pushScope(name: String, parent: Int): Int =
+  def assembleScope(mut: Scope, parent: => Option[ResolvedScope]): ResolvedScope =
+    // ??????????????
+    // Evil recursion
+    lazy val children: List[(String, ResolvedScope)] =
+      mut.children.toList.map: (name, idx) =>
+        (name, assembleScope(scopes(idx), Some(res)))
+    lazy val res: ResolvedScope =
+      ResolvedScope(children.toMap, mut.functionRegistry.toMap)(parent)
+    res
+
+    
+
+
+  def pushScope(name: String, parent: Int): Int throws ResolutionError =
     scopes.append(Scope(parent))
     val index = scopes.length - 1
     scopes(parent).addChild(name, index)
@@ -212,7 +233,7 @@ class Resolver:
           
           // displays any errors and throws if there were any at all
           report.displayAll
-          Right(ResolveResult(scopes.toVector, config, tickFunctions.toList, loadFunctions.toList, usedScoreboards.toMap, functionRegistry.toMap, newNses))
+          Right(ResolveResult(assembleScope(scopes.head, None), config, tickFunctions.toList, loadFunctions.toList, usedScoreboards.toMap, functionRegistry.toMap, newNses))
         catch
           case x: ResolverError =>
             Left(x)
