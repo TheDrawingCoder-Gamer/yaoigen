@@ -6,7 +6,7 @@ namespace example {
         }
     }
 
-    use module foo
+    module foo;
     //include "./bad"
 
     fn load() {

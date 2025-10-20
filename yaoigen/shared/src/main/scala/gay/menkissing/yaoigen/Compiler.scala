@@ -1619,11 +1619,11 @@ class Compiler:
 
 
   def enterScope(name: String): Unit = {
-    currentScope = currentScope.children(name)
+    currentScope = currentScope.children.getOrElse(name, throw InternalError(util.Location.blank, "Resolver failed to assemble scopes properly"))
   }
 
   def exitScope(): Unit = {
-    currentScope = currentScope.parent.get
+    currentScope = currentScope.parent.getOrElse(throw InternalError(util.Location.blank, "Resolver failed to make parent properly"))
   }
 
   def getLocation(location: ResourceLocation): mutable.ArrayBuffer[FileTree.Item] =
@@ -1662,7 +1662,7 @@ class Compiler:
       case include: parser.ast.Decl.IncludedItems => 
         include.items.foreach: item =>
           compileItem(item, location)
-      case _: UseModule => throw InternalError(ast.pos, "shouldn't be present here")
+      case _: ResolveTimeOnlyDecl => throw InternalError(ast.pos, "This should only be present during resolve time")
       case resource: ZResource => compileResource(resource, location)
       case ZConfig(pos, data) => ()
       case ZBuiltinCall(pos, call) => builtins.compileDecl(pos, call, location)
@@ -2118,8 +2118,9 @@ class Compiler:
         (res + compiled, needsMacro || insertNeedsMacro)
     }    
 
-    if needsMacro || res.startsWith("$") then
-      context.hasMacroArgs = true
+    // TODO: doesn't really fix anything if this is defined adhoc
+    //if needsMacro || res.startsWith("$") then
+    //  context.hasMacroArgs = true
     if needsMacro && !res.startsWith("$") then
       "$" + res
     else
@@ -2373,12 +2374,6 @@ class Compiler:
           ExpressionKind.ECondition(comparator.operator(leftScore, rightScore))
     Expression(left.pos, l.needsMacro || r.needsMacro, kind)
     
-
-
-
-
-
-
   def compileLogicalOr(pos: util.Location, left: parser.ast.Expr, right: parser.ast.Expr)(using context: FuncContext): Expression throws CompileError =
     val l = compileExpression(left, false)
     val r = compileExpression(right, false)

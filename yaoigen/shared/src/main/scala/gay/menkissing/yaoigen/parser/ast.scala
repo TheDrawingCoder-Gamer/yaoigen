@@ -390,6 +390,7 @@ object ast:
 
   sealed trait Decl:
     def pos: bridge.Pos
+  
   object Decl:
     case class Module(pos: bridge.Pos, name: String, items: List[Decl]) extends Decl
     object Module extends bridge.PosBridge2[String, List[Decl], Decl]
@@ -398,9 +399,14 @@ object ast:
     case class IncludedItems(pos: bridge.Pos, from: String, items: List[Decl]) extends Decl
     object IncludedItems extends bridge.PosBridge2[String, List[Decl], Decl]
 
-    case class UseModule(pos: bridge.Pos, name: String) extends Decl
-    object UseModule extends bridge.PosBridge1[String, Decl]
+    sealed abstract class ResolveTimeOnlyDecl extends Decl
+    // Plain submodule that includes as a module
+    case class SubModule(pos: bridge.Pos, name: String) extends ResolveTimeOnlyDecl
+    object SubModule extends bridge.PosBridge1[String, Decl]
 
+    // Includes the file `name` as if it were a module, but flattens its members into this module
+    case class UsedModule(pos: bridge.Pos, name: String) extends ResolveTimeOnlyDecl
+    object UsedModule extends bridge.PosBridge1[String, Decl]
 
     case class ZFunction(pos: bridge.Pos, returnType: ReturnType, name: String, params: List[Parameter], stmts: List[Stmt]) extends Decl
     object ZFunction extends bridge.PosBridge4[ReturnType, String, List[Parameter], List[Stmt], Decl]
@@ -419,4 +425,4 @@ object ast:
   case class Namespace(pos: bridge.Pos, name: String, items: List[Decl])
   object Namespace:
     def apply(name: Parsley[String], items: Parsley[List[Decl]])(using f: FileInfo): Parsley[Namespace] =
-      parsley.lift.lift3(Namespace.apply, f.pos, name, items)
+      (f.pos, name, items).mapN(Namespace.apply)

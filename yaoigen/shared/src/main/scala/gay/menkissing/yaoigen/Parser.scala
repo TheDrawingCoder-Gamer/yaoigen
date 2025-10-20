@@ -507,7 +507,7 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val decl: Parsley[ast.Decl] = {
     choice(
-      moduleOrUse,
+      moduleOrSub,
       fnDecl,
       freakyResource,
       include,
@@ -541,18 +541,18 @@ class Parser(val fileInfo: FileInfo):
   lazy val config: Parsley[ast.Decl] =
     ast.Decl.ZConfig(lexeme.symbol("mcmeta") ~> json.jroot)
 
-  lazy val moduleOrUse: Parsley[ast.Decl] =
+  lazy val moduleOrSub: Parsley[ast.Decl] =
     (fileInfo.pos, lexeme.symbol("module") *> lexeme.names.identifier).tupled <**>
       choice(
         lexeme.braces(Parsley.many(decl)).map(decls => {case (pos, name) => ast.Decl.Module(pos, name, decls)}),
-        lexeme.symbol.semi.as { case (pos, name) => ast.Decl.UseModule(pos, name) }
+        lexeme.symbol.semi.as { case (pos, name) => ast.Decl.SubModule(pos, name) }
       )
 
   lazy val module:  Parsley[ast.Decl] =
     lexeme.symbol("module") *> ast.Decl.Module(lexeme.names.identifier, lexeme.braces(Parsley.many(decl)))
 
   lazy val useModule: Parsley[ast.Decl] =
-    lexeme.symbol("use") *> lexeme.symbol("module") *> ast.Decl.UseModule(lexeme.names.identifier)
+    lexeme.symbol("use") *> lexeme.symbol("module") *> ast.Decl.UsedModule(lexeme.names.identifier)
 
   
   lazy val include: Parsley[ast.Decl] =
@@ -575,11 +575,9 @@ class Parser(val fileInfo: FileInfo):
       case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file ${newPath.toString}:", failure.msg.toString)
   */
   lazy val fnPrefixType: Parsley[ast.ReturnType] =
-    choice(
-      parsley.character.char('%') #> ast.ReturnType.Direct,
-      parsley.character.char('$') #> ast.ReturnType.Scoreboard,
-      Parsley.pure(ast.ReturnType.Storage)
-    )
+    parsley.character.char('%').as(ast.ReturnType.Direct)
+    <|> parsley.character.char('$').as(ast.ReturnType.Scoreboard)
+    </> ast.ReturnType.Storage
 
   lazy val fnParamKind: Parsley[ast.ParameterKind] =
     parsley.character.char('%').as(ast.ParameterKind.Macro)

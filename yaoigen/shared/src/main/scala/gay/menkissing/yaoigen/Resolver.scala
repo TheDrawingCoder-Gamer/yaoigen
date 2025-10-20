@@ -53,10 +53,10 @@ object Resolver:
     val functionRegistry: mutable.HashMap[String, ResourceLocation] = mutable.HashMap()
     ):
       // this part is only ever used in Resolver, so we can just make it ResolverError
-    def addChild(name: String, child: Int): Unit throws ResolutionError =
+    def addChild(pos: util.Location, name: String, child: Int): Unit throws ResolutionError =
       children.get(name) match
         case Some(_) => 
-          throw ResolutionError.global(s"Duplicate child $name")
+          throw ResolutionError(pos, s"Duplicate child $name")
         case None => children(name) = child
 
     def getChild(name: String): Option[Int] =
@@ -102,6 +102,9 @@ class Resolver:
       if nonfatalErrors.nonEmpty then
         throw ResolutionError.global(Seq("Resolution errors found", "(couldn't parse and assemble all files)"))
 
+    def submoduleError(pos: util.Location): Unit =
+      report(ResolutionError(pos, Seq("Can't do submodules inside an included file.", "If you need submodules, make the entire heirarchy submodules.")))
+
   def assembleScope(mut: Scope, parent: => Option[ResolvedScope]): ResolvedScope =
     // ??????????????
     // Evil recursion
@@ -115,17 +118,17 @@ class Resolver:
     
 
 
-  def pushScope(name: String, parent: Int): Int throws ResolutionError =
+  def pushScope(pos: util.Location, name: String, parent: Int): Int throws ResolutionError =
     scopes.append(Scope(parent))
     val index = scopes.length - 1
-    scopes(parent).addChild(name, index)
+    scopes(parent).addChild(pos, name, index)
     index
 
   def addFunction(scope: Int, name: String, location: ResourceLocation): Unit =
     scopes(scope).functionRegistry(name) = location
 
-  def resolveModule(name: String, items: List[ast.Decl], location: ResourceLocation, parentScope: Int)(using ResolveContext): List[ast.Decl] throws ResolverError =
-    val index = pushScope(name, parentScope)
+  def resolveModule(pos: util.Location, name: String, items: List[ast.Decl], location: ResourceLocation, parentScope: Int)(using ResolveContext): List[ast.Decl] throws ResolverError =
+    val index = pushScope(pos, name, parentScope)
     val newLoc = location.copy(modules = location.modules.appended(name))
     items.map: item =>
       resolveItem(item, newLoc, index)
@@ -134,31 +137,42 @@ class Resolver:
     val newInfo = ctx.fileInfo.copy(file = path)
     val parser = Parser(newInfo)
     val file = File(path)
-    parser.parseIncludedItems.parseFile(file).toEither.left.map(_ => ResolutionError(pos, "Couldn't open file"))
+    parser.parseIncludedItems.parseFile(file).toEither.left.map(_ => ResolutionError(pos, s"Can't open file $path"))
       .flatMap(_.toEither.left.map[ResolverError](ParseError.apply)) match
         case Left(err) =>
           report(err)
           List()
         case Right(items) => items
+
+
+
+  def getSubmoduleInfo(info: FileInfo, name: String): FileInfo =
+    val newPath =
+      if info.root == info.file then
+        Path.of(info.root).resolveSibling(name + ".yaoi").normalize()
+      else
+        assert(info.file.endsWith(".yaoi"))
+        Path.of(info.file.dropRight(5)).resolve(name + ".yaoi").normalize()
+    info.copy(file = newPath.toString)
   def resolveItem(item: ast.Decl, location: ResourceLocation, parentScope: Int)(using ctx: ResolveContext): ast.Decl throws ResolverError =
     import ast.Decl.*
     item match
       case Module(p, name, items) =>
-        Module(p, name, resolveModule(name, items, location, parentScope))
-      case m @ UseModule(modulePos, name) =>
+        Module(p, name, resolveModule(p, name, items, location, parentScope))
+      case m @ SubModule(modulePos, name) =>
         if !ctx.subModuleAllowed then
-          report(ResolutionError(modulePos, Seq("Can't do submodules inside an included file.", "If you need submodules, make the entire heirarchy submodules.")))
+          report.submoduleError(modulePos)
           return m
-        val newPath =
-          if ctx.fileInfo.root == ctx.fileInfo.file then
-            // resolve sibling
-            Path.of(ctx.fileInfo.root).resolveSibling(name + ".yaoi").normalize()
-          else
-            // resolve subdirectory
-            assert(ctx.fileInfo.file.endsWith(".yaoi"))
-            Path.of(ctx.fileInfo.file.dropRight(5)).resolve(name + ".yaoi").normalize()
-        val newInfo = ctx.fileInfo.copy(file = newPath.toString)
-        Module(modulePos, name, resolveModule(name, parseIncludedItems(modulePos, newPath.toString), location, parentScope)(using ctx.copy(fileInfo = newInfo)))
+        val newInfo = getSubmoduleInfo(ctx.fileInfo, name)
+        Module(modulePos, name, resolveModule(modulePos, name, parseIncludedItems(modulePos, newInfo.file), location, parentScope)(using ctx.copy(fileInfo = newInfo)))
+      case m @ UsedModule(modulePos, name) =>
+        if !ctx.subModuleAllowed then
+          report.submoduleError(modulePos)
+          return m
+        val newInfo = getSubmoduleInfo(ctx.fileInfo, name)
+        IncludedItems(modulePos, name,
+          parseIncludedItems(modulePos, newInfo.file)(using ctx.copy(fileInfo = newInfo)).map: it =>
+            resolveItem(it, location, parentScope)(using ctx.copy(fileInfo = newInfo)))
 
       case IncludedItems(pos, from, _) =>
         val newPath =
@@ -210,7 +224,7 @@ class Resolver:
   }
 
   def resolveNamespace(ns: ast.Namespace, parentScope: Int)(using ResolveContext): ast.Namespace throws ResolverError =
-    val index = pushScope(ns.name, parentScope)
+    val index = pushScope(ns.pos, ns.name, parentScope)
 
     val resource = ResourceLocation(ns.name, List(), ResourceKind.Module)
 
