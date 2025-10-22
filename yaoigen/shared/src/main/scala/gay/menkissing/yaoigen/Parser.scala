@@ -342,11 +342,14 @@ class Parser(val fileInfo: FileInfo):
     )
   }
 
-  lazy val stmt =
-    (fileInfo.pos, option(Parsley.some(decorator)), bareStmt).mapN:
-      case (pos, Some(decorators), stmt) =>
-        ast.Stmt.ZDecorated(pos, decorators, stmt)
-      case (_, _, stmt) => stmt
+  lazy val stmt: Parsley[ast.Stmt] =
+    decide(
+      option((fileInfo.pos <~> Parsley.some(decorator)) <**> decoratedStmt.map(_.tupled)),
+      bareStmt
+    )
+  lazy val decoratedStmt: Parsley[(util.Location, List[ast.Decorator]) => ast.Stmt] =
+    lexeme.braces(Parsley.many(stmt)).map[(util.Location, List[ast.Decorator]) => ast.Stmt](it => (loc, decorators) => ast.Stmt.ZDecoratedBlock(loc, decorators, it))
+    <|> bareStmt.map(it => (loc, decorators) => ast.Stmt.ZDecorated(loc, decorators, it))
 
   lazy val bareStmt: Parsley[ast.Stmt] = {
       (quotedCommand <* optional(lexeme.symbol.semi))

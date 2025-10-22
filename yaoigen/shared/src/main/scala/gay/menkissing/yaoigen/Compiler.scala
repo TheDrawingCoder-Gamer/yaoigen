@@ -1080,11 +1080,6 @@ object Compiler:
         },
         Builtin.exprOnly("spawn")(spawn(true)),
         Builtin.exprOnly("spawn_append")(spawn(false)),
-        Builtin.wrapComponent(builtinExecute.components("as")),
-        Builtin.wrapComponent(builtinExecute.components("at")),
-        Builtin.wrapComponent(builtinExecute.components("positioned")),
-        Builtin.wrapComponent(builtinExecute.components("store_success")),
-        Builtin.wrapComponent(builtinExecute.components("store_result")),
         Builtin.exprOnly("store_from") { (compiler, pos, args) => context ?=> 
           args match
             case Nil =>
@@ -1148,7 +1143,7 @@ object Compiler:
             case _ =>
               throw CompileError.nonfatal(pos, "Expected block position and nbt path")
         }
-      ).map(it => (it.name, it)).toMap
+      ).map(it => (it.name, it)).toMap ++ builtinExecute.components.map((k, v) => (k, Builtin.wrapComponent(v)))
 
   case class Builtin(name: String, 
                      exprFn: Option[(Compiler, util.Location, ast.BuiltinCall) => FuncContext ?=> Expression throws CompileError] = None,
@@ -1861,7 +1856,7 @@ class Compiler:
     context.code.append(mcfunc"function $func")
 
 
-  def compileStmtModifier(decorator: ast.Decorator)(using context: FuncContext): StmtModifier throws CompileError =
+  def compileStmtModifier(decorator: ast.Decorator): StmtModifier throws CompileError =
     decorator.name match
       case "spawn" =>
         val (delayN, suffix) =
@@ -1881,23 +1876,73 @@ class Compiler:
         StmtModifier.Spawn(ast.Delay(decorator.pos, delayN, timeType))
       case name =>
         throw CompileError.nonfatal(decorator.pos, s"Unknown statement decorator $name")
+  
 
-    
+  def decoratorToBuiltinCall(decorator: ast.Decorator): ast.BuiltinCall =
+    ast.BuiltinCall(decorator.name, decorator.args.map(arg => ast.BuiltinArg.BExpr(arg.pos, arg)))
+
+  def decoratorToBuiltinArg(decorator: ast.Decorator): ast.BuiltinArg =
+    ast.BuiltinArg.BExpr(decorator.pos, ast.Expr.ZBuiltinCall(decorator.pos, decoratorToBuiltinCall(decorator)))
+
+  def decoratorToBuiltinExecuteArg(decorator: ast.Decorator): ast.BuiltinArg throws CompileError =
+    if builtinExecute.components.contains(decorator.name) then
+      decoratorToBuiltinArg(decorator)
+    else
+      throw CompileError.nonfatal(decorator.pos, "Invalid execute decorator")
+
+  def decoratorsToBuiltinExecute(pos: util.Location, decorators: List[ast.Decorator], lastArg: ast.BuiltinArg)(using context: FuncContext): Unit throws CompileError =
+    val builtinArgs = decorators.map(decoratorToBuiltinExecuteArg)
+    val executeBuiltin = ast.BuiltinCall("execute", builtinArgs.appended(lastArg))
+    val _ = compileExpression(ast.Expr.ZBuiltinCall(pos, executeBuiltin), true)
 
 
-  def compileStatement(statement: parser.ast.Stmt, modifiers: List[StmtModifier] = List())(using context: FuncContext): Unit throws CompileError =
+  def expectEmptyDecorators(pos: util.Location, decorators: List[ast.Decorator]): Unit throws CompileError =
+    if decorators.nonEmpty then
+      throw CompileError.nonfatal(pos, "This statement doesn't take decorators")
+
+  def foldDecoratorCalls(decorators: List[ast.Decorator], lastArg: ast.BuiltinArg): ast.Expr =
+    val builtinCalls = decorators.map(it => (it.pos, decoratorToBuiltinCall(it)))
+    val foldedCalls =
+      builtinCalls.foldRight(lastArg):
+        case ((p, call), arg) =>
+          ast.BuiltinArg.BExpr(p, ast.Expr.ZBuiltinCall(p, call.copy(args = call.args.appended(arg))))
+    foldedCalls match
+      case ast.BuiltinArg.BExpr(_, call) =>
+        call
+      case _ => 
+        assert(false)
+
+
+  def compileStatement(statement: parser.ast.Stmt, decorators: List[ast.Decorator] = List())(using context: FuncContext): Unit throws CompileError =
     statement match
-      case Stmt.Eval(_, expr) => 
-        val _ = compileExpression(expr, true)
+      case Stmt.Eval(pos, expr) => 
+        if decorators.nonEmpty then
+          val lastArg = ast.BuiltinArg.BExpr(expr.pos, expr)
+          val resultExpr = foldDecoratorCalls(decorators, lastArg)
+          val _ = compileExpression(resultExpr, true)
+        else
+          val _ = compileExpression(expr, true)
       case x: Stmt.Command =>
+        if decorators.nonEmpty then
+          compileStatement(ast.Stmt.ZDecoratedBlock(x.pos, decorators, List(x)))
+          return
         val cmd = compileCommand(x) 
         context.code.append(cmd)
 
-      case Stmt.ZDecorated(pos, decorators, stmt) =>
-        assert(modifiers.isEmpty)
-        val mods = decorators.map(compileStmtModifier)
-        compileStatement(stmt, mods)
-      case Stmt.ZIf(pos, ifStatement) =>
+      case Stmt.ZDecoratedBlock(pos, decoratorsP, block) =>
+        // ...
+        assert(decorators.isEmpty)
+        val lastArg = ast.BuiltinArg.BBlock(pos, block)
+        val resultExpr = foldDecoratorCalls(decoratorsP, lastArg)
+        val _ = compileExpression(resultExpr, true)
+      case Stmt.ZDecorated(pos, decoratorsP, stmt) =>
+        assert(decorators.isEmpty)
+        
+        compileStatement(stmt, decoratorsP)
+      case self @ Stmt.ZIf(pos, ifStatement) =>
+        if decorators.nonEmpty then
+          compileStatement(ast.Stmt.ZDecoratedBlock(pos, decorators, List(self)))
+          return
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
@@ -1920,6 +1965,7 @@ class Compiler:
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
         subContext.hasNestedBreak = util.Box(false)
+        val modifiers = decorators.map(compileStmtModifier)
         val delay = 
           modifiers.collectFirst:
             case StmtModifier.Spawn(delay) => delay
@@ -1938,6 +1984,7 @@ class Compiler:
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
         subContext.hasNestedBreak = util.Box(false)
+        val modifiers = decorators.map(compileStmtModifier)
         val delay = 
           modifiers.collectFirst:
             case StmtModifier.Spawn(delay) => delay
@@ -1951,10 +1998,14 @@ class Compiler:
         if subContext.hasNestedContinue.value then
           context.hasNestedContinue.value = true
           generateNestedContinue()
-      case Stmt.ZReturn(_, expr) => compileReturn(expr)
+      case Stmt.ZReturn(pos, expr) => 
+        expectEmptyDecorators(pos, decorators)
+        compileReturn(expr)
       case Stmt.ZContinue(pos, label) =>
+        expectEmptyDecorators(pos, decorators)
         compileContinue(pos, label)
       case Stmt.ZBreak(pos, label) =>
+        expectEmptyDecorators(pos, decorators)
         compileBreak(pos, label)
 
   def compileSpawnCall(pos: util.Location, call: ast.FunctionCall, delay: ast.Delay, replace: Boolean)(using context: FuncContext): Unit throws CompileError =

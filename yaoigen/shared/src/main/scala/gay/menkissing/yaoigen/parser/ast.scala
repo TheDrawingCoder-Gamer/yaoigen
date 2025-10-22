@@ -338,6 +338,9 @@ object ast:
     case class ZDecorated(pos: bridge.Pos, decorators: List[Decorator], stmt: Stmt) extends Stmt
     object ZDecorated extends bridge.PosBridge2[List[Decorator], Stmt, Stmt]
 
+    case class ZDecoratedBlock(pos: bridge.Pos, decorators: List[Decorator], body: List[Stmt]) extends Stmt
+    object ZDecoratedBlock extends bridge.PosBridge2[List[Decorator], List[Stmt], Stmt]
+
     //case class ZForAs(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
     //object ZForAs extends bridge.PosBridge2[String, List[Stmt], Stmt]
 

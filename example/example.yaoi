@@ -11,6 +11,7 @@ namespace example {
 
     fn load() {
         say laoded
+        :x = 1
     }
 
     fn tick() {

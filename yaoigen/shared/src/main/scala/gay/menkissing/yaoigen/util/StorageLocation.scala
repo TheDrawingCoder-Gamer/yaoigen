@@ -7,6 +7,7 @@ import gay.menkissing.yaoigen.util.given
 object StorageLocation:
   def fromFnLoc(fnLoc: ResourceLocation): StorageLocation =
     val (module, name) = fnLoc.trySplit.get
+    // resource location with no path is apparently perfectly valid?
     StorageLocation(module, name)
   def resolveResource(fnLoc: ResourceLocation, resource: UnresolvedResource): StorageLocation =
     fromFnLoc(ResourceLocation.resolveResource(fnLoc, resource))
