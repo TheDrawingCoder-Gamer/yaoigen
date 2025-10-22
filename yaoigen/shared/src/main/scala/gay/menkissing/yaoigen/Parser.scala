@@ -244,26 +244,10 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val floating: Parsley[ast.Expr] =
     lexeme:
-      (fileInfo.pos, lexer.nonlexeme.floating.number).reverseApN:
-        choice(
-          (parsley.character.satisfy(_.toLower == 'f') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZFloat(pos, i.toFloat)),
-          (parsley.character.satisfy(_.toLower == 'd') <~ lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZDouble(pos, i.toDouble)),
-          Parsley.pure((pos, i) => ast.Expr.ZDouble(pos, i.toDouble))
-        )
+      ast.Expr.ZFloating(nonlexeme.floating.number, option(parsley.character.satisfy(_.isLetter)))
 
   lazy val integral: Parsley[ast.Expr] = 
-    lexeme:
-      (fileInfo.pos, lexer.nonlexeme.integer.number).reverseApN:
-      // TODO: someway to error out here if we truncate?
-        choice(
-          (parsley.character.satisfy(_.toLower == 'b') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZByte(pos, i.toByte)),
-          (parsley.character.satisfy(_.toLower == 's') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZShort(pos, i.toShort)),
-          (parsley.character.satisfy(_.toLower == 'i') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZInt(pos, i.toInt)),
-          (parsley.character.satisfy(_.toLower == 'l') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZLong(pos, i.toLong)),
-          (parsley.character.satisfy(_.toLower == 'f') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZFloat(pos, i.toFloat)),
-          (parsley.character.satisfy(_.toLower == 'd') <* lexer.space.whiteSpace) #> ((pos, i) => ast.Expr.ZDouble(pos, i.toDouble)),
-          Parsley.pure((pos, i) => ast.Expr.ZInt(pos, i.toInt))
-        )
+    lexeme(ast.Expr.ZIntegral(nonlexeme.integer.number, option(parsley.character.satisfy(_.isLetter))))
 
 
   lazy val arrayKind: Parsley[ast.ArrayKind] =
@@ -358,7 +342,13 @@ class Parser(val fileInfo: FileInfo):
     )
   }
 
-  lazy val stmt: Parsley[ast.Stmt] = {
+  lazy val stmt =
+    (fileInfo.pos, option(Parsley.some(decorator)), bareStmt).mapN:
+      case (pos, Some(decorators), stmt) =>
+        ast.Stmt.ZDecorated(pos, decorators, stmt)
+      case (_, _, stmt) => stmt
+
+  lazy val bareStmt: Parsley[ast.Stmt] = {
       (quotedCommand <* optional(lexeme.symbol.semi))
       <|> labeledDefinition
       <|> continueStmt
@@ -437,8 +427,8 @@ class Parser(val fileInfo: FileInfo):
   lazy val labelReference: Parsley[String] =
     nonlexeme.symbol(":") ~> lexeme.names.identifier
 
-  lazy val whileStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] = {
-    ast.Stmt.ZWhile.curriedPos <*> (whileKeyword ~> expr) <*> option(barSymbol ~> expr <~ barSymbol) <*> block
+  lazy val whileStmt: Parsley[Option[String] => ast.Stmt] = {
+    ast.Stmt.ZWhile.make.map(_.curried) <*> (whileKeyword ~> expr) <*> option(barSymbol ~> expr <~ barSymbol) <*> block
     
   }
 
@@ -472,19 +462,14 @@ class Parser(val fileInfo: FileInfo):
     ast.Decorator(nonlexeme.symbol("@:") *> lexeme.names.identifier, option(functionArguments).map(_.getOrElse(List())))
   
 
-  lazy val spawn: Parsley[ast.Delay] =
-    // alright, we'll just make it a decorator : )
-    // feels like cheating, but works!
-    nonlexeme.symbol("@:") *> lexeme.symbol("spawn") ~> lexeme.parens(delay)
 
 
   lazy val loop: Parsley[Option[String] => ast.Stmt] =
-    option(atomic(spawn)) <**> 
-      (forStmt <|> whileStmt)
+    (forStmt <|> whileStmt)
 
 
-  lazy val forStmt: Parsley[Option[ast.Delay] => Option[String] => ast.Stmt] =
-    ast.Stmt.ZFor.curriedPos <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
+  lazy val forStmt: Parsley[Option[String] => ast.Stmt] =
+    ast.Stmt.ZFor.make.map(_.curried) <*> (lexeme.symbol("for") ~> expr) <*> (lexeme.symbol("in") ~> forRange) <*> block
 
 
   lazy val ifStmt: Parsley[ast.IfStatement] = {

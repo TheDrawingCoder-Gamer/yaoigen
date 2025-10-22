@@ -72,6 +72,9 @@ object Compiler:
     def fatal(location: util.Location, msg: Seq[String]): CompileError =
       FatalCompileError(location, msg)
 
+  enum StmtModifier:
+    case Spawn(delay: ast.Delay)
+
   case class CalledFunction(location: ResourceLocation, returnType: ReturnType)
 
   enum FunctionCommand:
@@ -723,24 +726,30 @@ object Compiler:
           case Expr.ZBuiltinCall(pos, ast.BuiltinCall("bossbar", BossbarStore(bossbarId, maxOrValue))) =>
             Some((bossbarId, maxOrValue))
           case _ => None
+    object IntegralWithSuffix:
+      def unapply(it: ast.Expr): Option[(Int, Option[Char])] =
+        it match
+          case Expr.ZIntegral(_, n, s) => Some((n.toInt, s))
+          case Expr.Unary(_, UnaryKind.Negate, IntegralWithSuffix(n, s)) => Some((-n, s))
+          case _ => None
     object IntegralExpr:
       def unapply(it: ast.Expr): Option[Int] =
         it match
-          case Expr.ZByte(_, b) => Some(b.toInt)
-          case Expr.ZShort(_, s) => Some(s.toInt)
-          case Expr.ZInt(_, i) => Some(i.toInt)
-          case Expr.ZLong(_, l) => Some(l.toInt)
+          case Expr.ZIntegral(_, n, _) => Some(n.toInt)
           case Expr.Unary(_, UnaryKind.Negate, IntegralExpr(value)) => Some(-value)
+          case _ => None
+    object NumericWithSuffix:
+      def unapply(it: ast.Expr): Option[(Double, Option[Char])] =
+        it match
+          case Expr.ZIntegral(_, n, s) => Some((n.toDouble, s))
+          case Expr.ZFloating(_, n, s) => Some((n.toDouble, s))
+          case Expr.Unary(_, UnaryKind.Negate, NumericWithSuffix(n, s)) => Some((-n, s))
           case _ => None
     object NumericExpr:
       def unapply(it: ast.Expr): Option[Double] =
         it match
-          case Expr.ZByte(_, b) => Some(b.toDouble)
-          case Expr.ZShort(_, s) => Some(s.toDouble)
-          case Expr.ZInt(_, i) => Some(i.toDouble)
-          case Expr.ZLong(_, l) => Some(l.toDouble)
-          case Expr.ZFloat(_, f) => Some(f.toDouble)
-          case Expr.ZDouble(_, d) => Some(d)
+          case Expr.ZIntegral(_, n, _) => Some(n.toDouble)
+          case Expr.ZFloating(_, n, _) => Some(n.toDouble)
           case Expr.Unary(_, UnaryKind.Negate, NumericExpr(value)) => Some(-value)
           case _ => None
 
@@ -989,8 +998,8 @@ object Compiler:
             val (num, unit) = (str.init, str.last)
             val goodNum = num.toDoubleOption.getOrElse(throw CompileError.nonfatal(strPos, "Expected string to be a number with a unit at the end (either s, t, or d)"))
             (call, goodNum, unit.toString)
-          case List(BuiltinArg.BExpr(_, NumericExpr(value)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
-            (call, value, "t")
+          case List(BuiltinArg.BExpr(_, NumericWithSuffix(value, s)), BuiltinArg.BExpr(_, Expr.ZFunctionCall(_, call))) =>
+            (call, value, s.map(_.toString).getOrElse("t"))
           case _ =>
             throw CompileError.nonfatal(pos, "Expected a number, optionally a unit of measurement, and a function call.")
       val timeType =
@@ -1825,34 +1834,58 @@ class Compiler:
     
 
 
-  def compileForLoop(pos: util.Location, forLoop: ast.Stmt.ZFor)(using context: FuncContext): Unit throws CompileError =
+  def compileForLoop(pos: util.Location, forLoop: ast.Stmt.ZFor, delay: Option[ast.Delay])(using context: FuncContext): Unit throws CompileError =
     val func = nextFunction("for", context.location.namespace)
     val loopContext =
       forLoop.range match
         case ForRange.Single(n) =>
-          val _ = binaryOperation.compileAssignment(forLoop.variable, Expr.ZInt(util.Location.blank, 0))
-          LoopContext(Some(Expr.Binop(util.Location.blank, ast.BinopKind.Less, forLoop.variable, n)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(util.Location.blank, 1))), func)
+          val _ = binaryOperation.compileAssignment(forLoop.variable, Expr.ZIntegral(util.Location.blank, BigInt(0), None))
+          LoopContext(Some(Expr.Binop(util.Location.blank, ast.BinopKind.Less, forLoop.variable, n)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZIntegral(util.Location.blank, BigInt(1), None))), func)
         case ForRange.Range(min, inclusive, max) =>
           val _ = binaryOperation.compileAssignment(forLoop.variable, min)
-          LoopContext(Some(Expr.Binop(util.Location.blank, if inclusive then ast.BinopKind.LessEq else ast.BinopKind.Less, forLoop.variable, max)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZInt(util.Location.blank, 1))), func)
+          LoopContext(Some(Expr.Binop(util.Location.blank, if inclusive then ast.BinopKind.LessEq else ast.BinopKind.Less, forLoop.variable, max)), Some(Expr.Binop(util.Location.blank, ast.BinopKind.AddAssign, forLoop.variable, Expr.ZIntegral(util.Location.blank, BigInt(1), None))), func)
 
 
     val subContext = context.nested(NestKind.Loop(loopContext), func, forLoop.label)
-    compileLoop(pos, func, forLoop.body, forLoop.delay)(using subContext)
+    compileLoop(pos, func, forLoop.body, delay)(using subContext)
     context.code.append(mcfunc"function $func")
 
 
 
-  def compileWhileLoop(whileLoop: parser.ast.Stmt.ZWhile)(using context: FuncContext): Unit throws CompileError =
+  def compileWhileLoop(whileLoop: parser.ast.Stmt.ZWhile, delay: Option[ast.Delay])(using context: FuncContext): Unit throws CompileError =
     val func = nextFunction("while", context.location.namespace)
     val subContext = context.nested(NestKind.Loop(LoopContext(Some(whileLoop.cond), whileLoop.continueExpr, func)), func, whileLoop.label)
 
 
-    compileLoop(whileLoop.cond.pos, func, whileLoop.body, whileLoop.delay)(using subContext)
+    compileLoop(whileLoop.cond.pos, func, whileLoop.body, delay)(using subContext)
     context.code.append(mcfunc"function $func")
 
 
-  def compileStatement(statement: parser.ast.Stmt)(using context: FuncContext): Unit throws CompileError =
+  def compileStmtModifier(decorator: ast.Decorator)(using context: FuncContext): StmtModifier throws CompileError =
+    decorator.name match
+      case "spawn" =>
+        val (delayN, suffix) =
+          decorator.args match
+            case List(ast.Expr.ZIntegral(_, n, suffix)) =>
+              (n.toFloat, suffix)
+            case List(ast.Expr.ZFloating(_, n, suffix))=>
+              (n.toFloat, suffix)
+            case _ =>
+              throw CompileError.nonfatal(decorator.pos, "Expected number")
+        val timeType =
+          suffix match
+            case None | Some('t') => ast.TimeType.Ticks
+            case Some('s') => ast.TimeType.Seconds
+            case Some('d') => ast.TimeType.Day
+            case _ => throw CompileError.nonfatal(decorator.pos, "Incorrect suffix for time")
+        StmtModifier.Spawn(ast.Delay(decorator.pos, delayN, timeType))
+      case name =>
+        throw CompileError.nonfatal(decorator.pos, s"Unknown statement decorator $name")
+
+    
+
+
+  def compileStatement(statement: parser.ast.Stmt, modifiers: List[StmtModifier] = List())(using context: FuncContext): Unit throws CompileError =
     statement match
       case Stmt.Eval(_, expr) => 
         val _ = compileExpression(expr, true)
@@ -1860,6 +1893,10 @@ class Compiler:
         val cmd = compileCommand(x) 
         context.code.append(cmd)
 
+      case Stmt.ZDecorated(pos, decorators, stmt) =>
+        assert(modifiers.isEmpty)
+        val mods = decorators.map(compileStmtModifier)
+        compileStatement(stmt, mods)
       case Stmt.ZIf(pos, ifStatement) =>
         val subContext = context.plain
         subContext.hasNestedReturns = util.Box(false)
@@ -1883,7 +1920,10 @@ class Compiler:
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
         subContext.hasNestedBreak = util.Box(false)
-        compileWhileLoop(s)(using subContext)
+        val delay = 
+          modifiers.collectFirst:
+            case StmtModifier.Spawn(delay) => delay
+        compileWhileLoop(s, delay)(using subContext)
         if subContext.hasNestedReturns.value then
           context.hasNestedReturns.value = true
           generateNestedReturn()
@@ -1898,7 +1938,10 @@ class Compiler:
         subContext.hasNestedReturns = util.Box(false)
         subContext.hasNestedContinue = util.Box(false)
         subContext.hasNestedBreak = util.Box(false)
-        compileForLoop(statement.pos, s)(using subContext)
+        val delay = 
+          modifiers.collectFirst:
+            case StmtModifier.Spawn(delay) => delay
+        compileForLoop(statement.pos, s, delay)(using subContext)
         if subContext.hasNestedReturns.value then
           context.hasNestedReturns.value = true
           generateNestedReturn()
@@ -2634,12 +2677,47 @@ class Compiler:
       case s: Expr.Binop => binaryOperation.compile(s)
       case s: Expr.Unary  => unaryOperation.compile(s)
       case Expr.ZString(pos, contents) => Expression(pos, false, ExpressionKind.EString(contents))
-      case Expr.ZByte(pos, num) => Expression(pos, false, ExpressionKind.EByte(num))
-      case Expr.ZShort(pos, num) => Expression(pos, false, ExpressionKind.EShort(num))
-      case Expr.ZInt(pos, num) => Expression(pos, false, ExpressionKind.EInteger(num))
-      case Expr.ZLong(pos, num) => Expression(pos, false, ExpressionKind.ELong(num))
-      case Expr.ZFloat(pos, num) => Expression(pos, false, ExpressionKind.EFloat(num))
-      case Expr.ZDouble(pos, num) => Expression(pos, false, ExpressionKind.EDouble(num))
+      case Expr.ZIntegral(pos, n, suffix) =>
+        suffix.map(_.toLower) match
+          case None | Some('i') =>
+            if !n.isValidInt then
+              throw CompileError.nonfatal(pos, s"Int ${n.toString} doesn't fit inside signed integer limits")
+            else
+              Expression(pos, false, ExpressionKind.EInteger(n.toInt))
+          case Some('l') =>
+            if !n.isValidLong then
+              throw CompileError.nonfatal(pos, s"Long ${n.toString} doesn't fit inside signed long limits")
+            else
+              Expression(pos, false, ExpressionKind.ELong(n.toLong))
+          case Some('b') =>
+            if !n.isValidByte then
+              throw CompileError.nonfatal(pos, s"Byte ${n.toString} doesn't fit inside signed byte limits")
+            else
+              Expression(pos, false, ExpressionKind.EByte(n.toByte))
+          case Some('s') =>
+            if !n.isValidShort then
+              throw CompileError.nonfatal(pos, s"Short ${n.toString} doesn't fit inside signed short limits")
+            else
+              Expression(pos, false, ExpressionKind.EShort(n.toShort))
+          case Some('d') =>
+            if !n.isValidDouble then
+              report.warning(CompileError.nonfatal(pos, s"Integral value ${n.toString} won't convert exactly to a double"))
+            Expression(pos, false, ExpressionKind.EDouble(n.toDouble))
+          case Some('f') =>
+            if !n.isValidFloat then
+              report.warning(CompileError.nonfatal(pos, s"Integral value ${n.toString} won't convert exactly to a float"))
+            Expression(pos, false, ExpressionKind.EFloat(n.toFloat))
+          case Some(v) =>
+            throw CompileError.nonfatal(pos, Seq(s"Unknown integer suffix '$v'"))
+      case Expr.ZFloating(pos, n, suffix) =>
+        suffix.map(_.toLower) match
+          case Some('d') | None =>
+            // Don't report rounding issues for decimals
+            Expression(pos, false, ExpressionKind.EDouble(n.toDouble))
+          case Some('f') =>
+            Expression(pos, false, ExpressionKind.EFloat(n.toFloat))
+          case Some(v) =>
+            throw CompileError.nonfatal(pos, s"Unknown floating suffix '$v'")
       case Expr.ZBool(pos, v) => Expression(pos, false, ExpressionKind.EBoolean(v))
       case Expr.ZList(pos, kind, values) => compileArray(kind, values, pos)
       case Expr.ZCompound(pos, map) => compileCompound(pos, map)

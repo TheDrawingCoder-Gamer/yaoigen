@@ -149,23 +149,11 @@ object ast:
     case class ZString(pos: bridge.Pos, contents: String) extends Expr
     object ZString extends bridge.PosBridge1[String, Expr]
 
-    case class ZByte(pos: bridge.Pos, num: Byte) extends Expr
-    object ZByte extends bridge.PosBridge1[Byte, Expr]
+    case class ZIntegral(pos: bridge.Pos, number: BigInt, suffix: Option[Char]) extends Expr
+    object ZIntegral extends bridge.PosBridge2[BigInt, Option[Char], Expr]
 
-    case class ZShort(pos: bridge.Pos, num: Short) extends Expr
-    object ZShort extends bridge.PosBridge1[Short, Expr]
-
-    case class ZInt(pos: bridge.Pos, num: Int) extends Expr
-    object ZInt extends bridge.PosBridge1[Int, Expr]
-
-    case class ZLong(pos: bridge.Pos, num: Long) extends Expr
-    object ZLong extends bridge.PosBridge1[Long, Expr]
-
-    case class ZFloat(pos: bridge.Pos, num: Float) extends Expr
-    object ZFloat extends bridge.PosBridge1[Float, Expr]
-
-    case class ZDouble(pos: bridge.Pos, num: Double) extends Expr
-    object ZDouble extends bridge.PosBridge1[Double, Expr]
+    case class ZFloating(pos: bridge.Pos, number: BigDecimal, suffix: Option[Char]) extends Expr
+    object ZFloating extends bridge.PosBridge2[BigDecimal, Option[Char], Expr]
 
     case class ZBool(pos: bridge.Pos, num: Boolean) extends Expr
     object ZBool extends bridge.PosBridge1[Boolean, Expr]
@@ -341,11 +329,14 @@ object ast:
     case class ZIf(pos: bridge.Pos, ifStatement: IfStatement) extends Stmt
     object ZIf extends bridge.PosBridge1[IfStatement, Stmt]
 
-    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
-    object ZWhile extends bridge.PosBridge5[Expr, Option[Expr], List[Stmt], Option[Delay], Option[String], Stmt]
+    case class ZWhile(pos: bridge.Pos, cond: Expr, continueExpr: Option[Expr], body: List[Stmt], label: Option[String]) extends Stmt
+    object ZWhile extends bridge.PosBridge4[Expr, Option[Expr], List[Stmt], Option[String], Stmt]
 
-    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], delay: Option[Delay], label: Option[String]) extends Stmt
-    object ZFor extends bridge.PosBridge5[Expr, ForRange, List[Stmt], Option[Delay], Option[String], Stmt]
+    case class ZFor(pos: bridge.Pos, variable: Expr, range: ForRange, body: List[Stmt], label: Option[String]) extends Stmt
+    object ZFor extends bridge.PosBridge4[Expr, ForRange, List[Stmt], Option[String], Stmt]
+
+    case class ZDecorated(pos: bridge.Pos, decorators: List[Decorator], stmt: Stmt) extends Stmt
+    object ZDecorated extends bridge.PosBridge2[List[Decorator], Stmt, Stmt]
 
     //case class ZForAs(pos: bridge.Pos, selector: String, body: List[Stmt]) extends Stmt
     //object ZForAs extends bridge.PosBridge2[String, List[Stmt], Stmt]
