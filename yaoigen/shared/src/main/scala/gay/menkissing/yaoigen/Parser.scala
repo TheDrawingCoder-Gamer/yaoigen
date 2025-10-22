@@ -129,7 +129,7 @@ object Parser:
     "*", "+", "-", "/", "%",
     "*=", "+=", "-=", "/=", "%=", "=",
     "==", "!=", "<", ">", ">=", "<=",
-    "~/", "~", "^"
+    "~/", "~", "^", "@:"
   )
   val symbolDesc =
     SymbolDesc.plain.copy(
@@ -289,8 +289,10 @@ class Parser(val fileInfo: FileInfo):
 
   lazy val namespaceString: Parsley[String] =
     // TODO: way to remove atomic here?
-    atomic(option(atomic(nonlexeme.names.identifier)).map(_.getOrElse("")) <~ nonlexeme.symbol.colon)
-    <|> nonlexeme.symbol("~/").as("~")
+    // seems not : (
+    nonlexeme.symbol("~/").as("~")
+    <|> atomic(option(atomic(nonlexeme.names.identifier)).map(_.getOrElse("")) <~ nonlexeme.symbol.colon)
+
 
 
   lazy val unresolvedResourcePath: Parsley[(List[String], String)] =
@@ -466,11 +468,14 @@ class Parser(val fileInfo: FileInfo):
       )
     )
     
+  lazy val decorator: Parsley[ast.Decorator] =
+    ast.Decorator(nonlexeme.symbol("@:") *> lexeme.names.identifier, option(functionArguments).map(_.getOrElse(List())))
+  
 
   lazy val spawn: Parsley[ast.Delay] =
-    // TODO: stupid no good spawn NOT being a keyword causes jank...
-    // but it being a keyword ALSO causes jank
-    lexeme.symbol("spawn") ~> lexeme.parens(delay)
+    // alright, we'll just make it a decorator : )
+    // feels like cheating, but works!
+    nonlexeme.symbol("@:") *> lexeme.symbol("spawn") ~> lexeme.parens(delay)
 
 
   lazy val loop: Parsley[Option[String] => ast.Stmt] =
@@ -545,7 +550,7 @@ class Parser(val fileInfo: FileInfo):
     (fileInfo.pos, lexeme.symbol("module") *> lexeme.names.identifier).tupled <**>
       choice(
         lexeme.braces(Parsley.many(decl)).map(decls => {case (pos, name) => ast.Decl.Module(pos, name, decls)}),
-        lexeme.symbol.semi.as { case (pos, name) => ast.Decl.SubModule(pos, name) }
+        optional(lexeme.symbol.semi).as { case (pos, name) => ast.Decl.SubModule(pos, name) }
       )
 
   lazy val module:  Parsley[ast.Decl] =
@@ -557,23 +562,7 @@ class Parser(val fileInfo: FileInfo):
   
   lazy val include: Parsley[ast.Decl] =
     ast.Decl.IncludedItems(lexeme.symbol("include") ~> lexeme.string.fullUtf16, Parsley.pure(List()))
-  /*
-  // TODO: recursion prevention
-  lazy val includedItems: Parsley[ast.Decl] =
-    lexeme.symbol("include") *> lexeme.string.fullUtf16.flatMap { rel_path =>
-      child(rel_path)
-    }.impure
 
-  def child(name: String): Parsley[ast.Decl] =
-    val actualName = if !name.endsWith(".yaoi") then name + ".yaoi" else name
-    val newPath = Path.of(fileInfo.file).resolveSibling(actualName).normalize()
-    val newInfo = fileInfo.copy(file = newPath.toString)
-    val newParser = Parser(newInfo)
-    val fileData = java.nio.file.Files.readString(newPath, StandardCharsets.UTF_8)
-    lexer.fully(Parsley.many(newParser.decl)).parse(fileData) match
-      case Success(x) => fileInfo.pos.map(p => ast.Decl.IncludedItems(p, name, x))
-      case failure: Failure[_] => parsley.errors.combinator.fail(s"Error in file ${newPath.toString}:", failure.msg.toString)
-  */
   lazy val fnPrefixType: Parsley[ast.ReturnType] =
     parsley.character.char('%').as(ast.ReturnType.Direct)
     <|> parsley.character.char('$').as(ast.ReturnType.Scoreboard)

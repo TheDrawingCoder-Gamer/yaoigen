@@ -130,6 +130,9 @@ object ast:
       s"$n${kind.key}"
   object Delay extends bridge.PosBridge2[Float, TimeType, Delay]
 
+  case class Decorator(pos: bridge.Pos, name: String, args: List[Expr])
+  object Decorator extends bridge.PosBridge2[String, List[Expr], Decorator]
+
   sealed trait Expr:
     def pos: bridge.Pos
     val executorSensitive = false
